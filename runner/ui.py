@@ -5,7 +5,6 @@ on the main Revit window -- they hang due to the enormous UIA tree.
 Use shallow_search() which walks children() level by level instead.
 """
 
-import re
 import time
 
 from pywinauto import Application
