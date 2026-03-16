@@ -79,36 +79,85 @@ _stats = _Stats()
 _app = None
 _main_win = None
 _cache = None
+_connected = False
 
 
 def connect():
-    global _app, _main_win
-    _app = Application(backend="uia").connect(path="Revit.exe")
+    global _app, _main_win, _connected
+    try:
+        _app = Application(backend="uia").connect(path="Revit.exe")
+    except Exception as e:
+        _app = None
+        _main_win = None
+        _connected = False
+        log.warning("Revit not found: %s", e)
+        return {"connected": False, "error": str(e)}
     for w in _app.windows():
         t = w.window_text()
         if "revit" in t.lower() and (".rvt" in t.lower() or "autodesk" in t.lower()):
             _main_win = w
+            _connected = True
+            log.info("Connected to Revit: %s", t)
             return {"connected": True, "window": t}
-    # fallback: first window
     wins = _app.windows()
     if wins:
         _main_win = wins[0]
-        return {"connected": True, "window": _main_win.window_text()}
+        _connected = True
+        t = _main_win.window_text()
+        log.info("Connected to Revit (fallback): %r", t)
+        return {"connected": True, "window": t}
+    _connected = False
     return {"connected": False, "error": "No Revit windows found"}
 
 
 def ensure_connected():
-    global _app, _main_win
+    global _app, _main_win, _connected
     if _main_win is None:
         return connect()
-    # verify still alive
     try:
         _main_win.window_text()
         return {"connected": True}
     except Exception:
         _app = None
         _main_win = None
+        _connected = False
         return connect()
+
+
+def _heartbeat_loop():
+    """Background thread: monitor Revit process, auto-reconnect."""
+    global _connected
+    import psutil
+    while True:
+        time.sleep(3)
+        # check if Revit process exists
+        revit_alive = any(
+            p.info['name'] and p.info['name'].lower() == 'revit.exe'
+            for p in psutil.process_iter(['name'])
+        )
+        if not revit_alive:
+            if _connected:
+                log.info("HEARTBEAT: Revit process gone. Marking disconnected.")
+                _connected = False
+                globals()['_app'] = None
+                globals()['_main_win'] = None
+            continue
+
+        if not _connected:
+            log.info("HEARTBEAT: Revit process found. Reconnecting...")
+            time.sleep(2)  # let Revit settle
+            result = connect()
+            log.info("HEARTBEAT: reconnect result: %s", result)
+            continue
+
+        # connected -- verify window still valid
+        try:
+            title = _main_win.window_text() if _main_win else ""
+            # if title changed (e.g. project loaded), log it
+        except Exception:
+            log.info("HEARTBEAT: Window stale. Reconnecting...")
+            _connected = False
+            connect()
 
 
 def _doc_title():
@@ -659,6 +708,12 @@ def main():
     result = connect()
     log.info("Revit connection: %s", result)
     print(f"  {result}")
+
+    # start heartbeat
+    import threading
+    hb = threading.Thread(target=_heartbeat_loop, daemon=True)
+    hb.start()
+    print("Heartbeat: monitoring Revit process every 3s")
 
     print(f"Log: {LOG_PATH}  (tail -f server.log)")
     server = HTTPServer(("127.0.0.1", args.port), Handler)
