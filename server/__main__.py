@@ -29,6 +29,7 @@ except ImportError:
     sys.exit(2)
 
 from server.cache import Cache
+from server import health
 
 LOG_PATH = Path(__file__).resolve().parent.parent / "server.log"
 
@@ -306,7 +307,12 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
 
-        if parsed.path == "/status":
+        if parsed.path == "/health":
+            h = health.check(_main_win)
+            log.info("GET /health  state=%s  %s", h["state"], h.get("in_state", ""))
+            self.respond(h)
+
+        elif parsed.path == "/status":
             result = ensure_connected()
             if _main_win:
                 result["window"] = _main_win.window_text()
