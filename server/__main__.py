@@ -384,13 +384,29 @@ def elem_inspect(elem):
     return d
 
 
+_children_cache = {}  # wrapper_id -> (timestamp, [children])
+_CHILDREN_TTL = 5  # seconds
+
+def _cached_children(elem):
+    """Get children with short TTL cache to avoid repeated slow UIA calls."""
+    key = id(elem)
+    now = time.time()
+    if key in _children_cache:
+        ts, kids = _children_cache[key]
+        if now - ts < _CHILDREN_TTL:
+            return kids
+    kids = elem.children()
+    _children_cache[key] = (now, kids)
+    return kids
+
+
 def get_element_by_path(path):
     """Navigate to an element by index path like '4.13' (child 4, then child 13)."""
     ensure_connected()
     current = _main_win
     for idx_str in path.split("."):
         idx = int(idx_str)
-        kids = current.children()
+        kids = _cached_children(current)
         if idx >= len(kids):
             return None
         current = kids[idx]
