@@ -76,6 +76,22 @@ Result dialog      -> 38+1 children (result as first child)
 - ListBox[0] DataItem order may vary (but AutomationIds on panels are stable)
 - Number of TabControl/Thumb pairs (docking layout)
 
+## UIA Native Lookup Performance
+
+Tested `child_window(auto_id=...)` on Revit main window (pywinauto FindFirst):
+- `Graftd`: 34.6s (full tree walk)
+- `mMainTabs`: 33.8s (full tree walk)
+- `CustomCtrl_%Graftd%Elevations`: ambiguous (2 matches -- panel + button child share same id)
+
+**UIA native auto_id search is NOT faster than manual BFS.** Both do full tree walk.
+The only fast path is cached `auto_id -> index path` mapping on our side.
+
+## AutomationId Uniqueness
+
+AutomationIds are NOT globally unique. A panel and its child button can share the same
+id (e.g. `CustomCtrl_%Graftd%Elevations` appears on both the Custom panel wrapper and
+its Button child). When searching, expect multiple matches and filter by type.
+
 ## Implications for Automation
 
 1. **Always find elements by AutomationId**, never by index path
