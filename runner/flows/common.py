@@ -86,56 +86,37 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
     time.sleep(1)
 
     # -- Step 3: command in flyout ----------------------------------------
-    log(f"click {cmd_auto_id} in flyout")
+    # Flyout is ephemeral (~3s). Don't fetch its tree. Click known path.
+    # Flyout structure is always: [0]=Dialog -> [1]=ListBox -> [0]=DataItem -> [0]=Custom -> [0]=Button
+    # So command button is at path 0.1.0.0.0 relative to main window
+    FLYOUT_CMD_PATH = "0.1.0.0.0"
+    log(f"click {cmd_auto_id} in flyout (path={FLYOUT_CMD_PATH})")
     cmd_clicked = False
     panel_retried = False
     for attempt in range(15):
-        # check child[0] -- flyout appears here
+        # quick check: is child[0] the flyout?
         first = api.tree(path="0", depth=0)
         aid = first.get("id", "")
-        if "SlideOutPanelPopup" not in aid and "PopupRoot" not in aid:
+        if "SlideOutPanelPopup" in aid or "PopupRoot" in aid:
+            # flyout is open -- click command immediately
+            log(f"  flyout found (attempt {attempt+1}), clicking {FLYOUT_CMD_PATH}...")
+            r = api.click(path=FLYOUT_CMD_PATH, method="click_input")
+            log(f"  -> clicked={r.get('clicked')} text={r.get('text')!r}")
+            if r.get("clicked"):
+                cmd_clicked = True
+                break
+            else:
+                log(f"  click miss, flyout may have closed")
+        else:
             if attempt == 0:
                 log(f"  flyout not at [0] yet (got {first.get('type')}:{aid[:30]})")
-            # after 3 misses, re-click panel (focus may have been lost)
+            # re-click panel after a few misses
             if attempt == 3 and not panel_retried:
                 panel_retried = True
                 log(f"  re-clicking panel...")
                 api.click(auto_id=panel_auto_id, control_type="Button", method="focus_click")
-                if not r.get("clicked"):
-                    api.click(auto_id=panel_auto_id, control_type="Custom", method="focus_click")
                 time.sleep(1)
-            else:
-                time.sleep(0.5)
-            continue
-
-        # flyout found -- get its tree and find command
-        log(f"  flyout at [0] (attempt {attempt+1})")
-        ftree = api.tree(path="0", depth=4)
-
-        import jmespath
-        matches = []
-        for expr in [
-            f"children[?id && contains(id, '{cmd_auto_id}')][]",
-            f"children[].children[?id && contains(id, '{cmd_auto_id}')][]",
-            f"children[].children[].children[?id && contains(id, '{cmd_auto_id}')][]",
-            f"children[].children[].children[].children[?id && contains(id, '{cmd_auto_id}')][]",
-        ]:
-            matches = jmespath.search(expr, ftree) or []
-            if matches:
-                break
-
-        if matches:
-            cmd_path = _find_path_in_json(ftree, matches[0])
-            if cmd_path:
-                full_path = f"0.{cmd_path}"
-                log(f"  command at {full_path}, clicking...")
-                r = api.click(path=full_path, method="click_input")
-                log(f"  -> clicked={r.get('clicked')}")
-                if r.get("clicked"):
-                    cmd_clicked = True
-                    break
-        else:
-            log(f"  flyout open but {cmd_auto_id} not in tree")
+                continue
         time.sleep(0.5)
 
     if not cmd_clicked:
