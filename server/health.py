@@ -35,7 +35,7 @@ def _proc_info(proc):
     """Get process stats."""
     try:
         mem = proc.memory_info()
-        cpu = proc.cpu_percent(interval=0.5)
+        cpu = proc.cpu_percent(interval=0.1)
         create_time = proc.create_time()
         uptime = time.time() - create_time
         return {
