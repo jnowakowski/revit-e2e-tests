@@ -16,28 +16,46 @@ class RevitAPI:
     def __init__(self, base_url=SERVER):
         self.base = base_url
 
-    def _get(self, path, timeout=30):
+    def _log(self, method, url, body=None):
+        if body:
+            print(f"  >> {method} {url}  body={json.dumps(body)}", flush=True)
+        else:
+            print(f"  >> GET {url}", flush=True)
+
+    def _get(self, path, timeout=60):
         url = f"{self.base}{path}"
+        self._log("GET", url)
+        t0 = time.time()
         try:
             with urllib.request.urlopen(url, timeout=timeout) as r:
-                return json.loads(r.read())
+                result = json.loads(r.read())
+                print(f"  << {time.time()-t0:.1f}s", flush=True)
+                return result
         except urllib.error.HTTPError as e:
+            print(f"  << {time.time()-t0:.1f}s HTTP {e.code}", flush=True)
             return json.loads(e.read())
-        except urllib.error.URLError as e:
-            return {"error": f"Server not reachable: {e}"}
+        except (urllib.error.URLError, TimeoutError) as e:
+            print(f"  << {time.time()-t0:.1f}s TIMEOUT/ERROR: {e}", flush=True)
+            return {"error": f"Server: {e}"}
 
-    def _post(self, path, body, timeout=30):
+    def _post(self, path, body, timeout=60):
         url = f"{self.base}{path}"
         data = json.dumps(body).encode()
         req = urllib.request.Request(url, data=data)
         req.add_header("Content-Type", "application/json")
+        self._log("POST", url, body)
+        t0 = time.time()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.loads(r.read())
+                result = json.loads(r.read())
+                print(f"  << {time.time()-t0:.1f}s", flush=True)
+                return result
         except urllib.error.HTTPError as e:
+            print(f"  << {time.time()-t0:.1f}s HTTP {e.code}", flush=True)
             return json.loads(e.read())
-        except urllib.error.URLError as e:
-            return {"error": f"Server not reachable: {e}"}
+        except (urllib.error.URLError, TimeoutError) as e:
+            print(f"  << {time.time()-t0:.1f}s TIMEOUT/ERROR: {e}", flush=True)
+            return {"error": f"Server: {e}"}
 
     def health(self):
         return self._get("/health")
