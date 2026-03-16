@@ -106,8 +106,18 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
         return False, f"Graftd click failed: {r.get('error')}"
     time.sleep(1)
 
+    # Build cache: fetch Graftd tab content (ListBox[0] -> DataItems -> panels)
+    log("  Caching Graftd panel tree...")
+    t0 = time.time()
+    # ListBox is child[0], Graftd DataItem is typically at index 18
+    # Fetch with depth=4 to capture panel buttons
+    panel_tree = api.tree(path="0", depth=4)
+    dt = time.time() - t0
+    log(f"  Cached ListBox tree ({dt:.1f}s)")
+
     # ── Step 2: Click collapsed panel ───────────────────────────────
     log(f"Step 2: Clicking panel {panel_auto_id}...")
+    # search in the cached panel tree via jmespath
     t0 = time.time()
     search = api._get(f"/search?q={panel_auto_id}&by=auto_id&depth=6")
     results = search.get("results", [])
