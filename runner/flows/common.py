@@ -136,7 +136,7 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
             btn_path = f"{panel_path}.{i}"
             log(f"  Button child at {btn_path}")
             break
-    r = api.click(path=btn_path, method="click_input")
+    r = api.click(path=btn_path, method="focus_click")
     dt2 = time.time() - t0
     log(f"  Click: clicked={r.get('clicked')} text={r.get('text')!r} ({dt2:.1f}s)")
     if not r.get("clicked"):
@@ -144,59 +144,52 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
     time.sleep(1)
 
     # ── Step 3: Find and click command in flyout ────────────────────
-    log(f"Step 3: Looking for flyout popup...")
-    flyout = None
-    for attempt in range(10):
+    log(f"Step 3: Looking for flyout and {cmd_auto_id}...")
+    # poll for flyout via /search (uses cache, fast)
+    cmd_path = None
+    for attempt in range(15):
         t0 = time.time()
-        tree = api.tree(depth=1)
+        # fetch fresh tree to update cache with flyout
+        tree = api.tree(depth=2)
         dt = time.time() - t0
+        # look for flyout in children
         children = tree.get("children", [])
-        for child in children:
+        flyout_idx = None
+        for i, child in enumerate(children):
             aid = child.get("id", "")
             if "SlideOutPanelPopup" in aid or "PopupRoot" in aid:
-                flyout = child
-                log(f"  Flyout found: id={aid[:60]} ({dt:.1f}s, attempt {attempt+1})")
+                flyout_idx = i
+                log(f"  Flyout at [{i}] ({dt:.1f}s, attempt {attempt+1})")
                 break
-        if flyout:
-            break
+        if flyout_idx is not None:
+            # search within flyout for command
+            search = api._get(f"/search?q={cmd_auto_id}&by=auto_id&depth=4&scope={flyout_idx}")
+            results = search.get("results", [])
+            if results:
+                cmd_path = results[0]["path"]
+                log(f"  Command: path={cmd_path} text={results[0].get('text')!r}")
+                break
+            else:
+                # flyout found but command not yet -- fetch deeper
+                api.tree(path=str(flyout_idx), depth=4)
+                search = api._get(f"/search?q={cmd_auto_id}&by=auto_id&depth=4&scope={flyout_idx}")
+                results = search.get("results", [])
+                if results:
+                    cmd_path = results[0]["path"]
+                    log(f"  Command (deep): path={cmd_path}")
+                    break
         if attempt == 0:
             log(f"  Not yet ({dt:.1f}s), polling...")
-        time.sleep(1)
+        time.sleep(0.5)
 
-    if not flyout:
-        log("  FAIL: Flyout did not appear after 10 attempts.")
-        log(f"  Children types: {[c.get('type') for c in children[:5]]}")
-        return False, "Flyout not found"
+    if not cmd_path:
+        log("  FAIL: Flyout/command not found after 15 attempts.")
+        return False, "Flyout or command not found"
 
-    # find command button in flyout
-    log(f"  Searching for {cmd_auto_id} in flyout...")
-    # get flyout path -- it's in children, find its index
-    flyout_idx = None
-    for i, child in enumerate(children):
-        aid = child.get("id", "")
-        if "SlideOutPanelPopup" in aid or "PopupRoot" in aid:
-            flyout_idx = i
-            break
-
-    if flyout_idx is not None:
-        t0 = time.time()
-        search = api._get(f"/search?q={cmd_auto_id}&by=auto_id&depth=4&scope={flyout_idx}")
-        results = search.get("results", [])
-        dt = time.time() - t0
-        if results:
-            cmd_path = results[0]["path"]
-            log(f"  Command found at path={cmd_path} text={results[0].get('text')!r} ({dt:.1f}s)")
-            r = api.click(path=cmd_path, method="click_input")
-            log(f"  Click result: clicked={r.get('clicked')} ({r.get('method')})")
-            if not r.get("clicked"):
-                log(f"  FAIL: {r}")
-                return False, f"Command click failed: {r.get('error')}"
-        else:
-            log(f"  FAIL: {cmd_auto_id} not found in flyout. search: {search}")
-            return False, f"Command {cmd_auto_id} not found in flyout"
-    else:
-        log("  FAIL: Could not determine flyout index")
-        return False, "Flyout index unknown"
+    r = api.click(path=cmd_path, method="click_input")
+    log(f"  Click: clicked={r.get('clicked')}")
+    if not r.get("clicked"):
+        return False, f"Command click failed: {r.get('error')}"
 
     # ── Step 4: Wait for result dialog ──────────────────────────────
     log("Step 4: Waiting for result dialog...")

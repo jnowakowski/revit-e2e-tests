@@ -35,7 +35,7 @@ def _proc_info(proc):
     """Get process stats."""
     try:
         mem = proc.memory_info()
-        cpu = proc.cpu_percent(interval=0.1)
+        cpu = proc.cpu_percent(interval=0)  # non-blocking, returns 0 on first call
         create_time = proc.create_time()
         uptime = time.time() - create_time
         return {
@@ -60,30 +60,12 @@ def _detect_state(proc_info, main_win):
     if mem < 200 and uptime < 60:
         return "starting"
 
-    # check window
+    # check window title only (no children() -- too slow)
     title = ""
-    first_child_text = ""
     try:
         title = main_win.window_text() if main_win else ""
     except Exception:
         pass
-
-    try:
-        if main_win:
-            kids = main_win.children()
-            if kids:
-                first_child_text = kids[0].window_text()
-    except Exception:
-        pass
-
-    if "Security" in first_child_text or "Unsigned" in first_child_text:
-        return "security_dialog"
-
-    if "Command Failure" in first_child_text:
-        return "busy"
-
-    if first_child_text and ("GenerateElevations" in first_child_text or "GetDetails" in first_child_text):
-        return "busy"
 
     if ".rvt" in title.lower():
         return "ready"

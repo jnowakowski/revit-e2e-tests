@@ -302,6 +302,31 @@ def get_element_by_path(path):
     return current
 
 
+def _search_json_recursive(node, query, by, current_path, results, seen_ids):
+    """Recursively search a cached JSON tree. Deduplicates by auto_id."""
+    match = False
+    node_id = node.get("id", "")
+    if by == "auto_id" and node_id and query.lower() in node_id.lower():
+        match = True
+    elif by == "text":
+        t = node.get("text", "")
+        if t and query.lower() in t.lower():
+            match = True
+    if match:
+        dedup_key = f"{node_id}:{node.get('text','')}:{node.get('type','')}"
+        if dedup_key not in seen_ids:
+            seen_ids.add(dedup_key)
+            results.append({
+                "path": current_path,
+                "text": node.get("text", "")[:120],
+                "type": node.get("type", ""),
+                "auto_id": node_id,
+            })
+    for i, child in enumerate(node.get("children", [])):
+        child_path = f"{current_path}.{i}" if current_path else str(i)
+        _search_json_recursive(child, query, by, child_path, results, seen_ids)
+
+
 def _find_path_in_json(tree, target, _prefix=""):
     """Find index path of a node in a JSON tree by matching text+type+id."""
     for i, child in enumerate(tree.get("children", [])):
@@ -498,29 +523,19 @@ class Handler(BaseHTTPRequestHandler):
             source = "live"
             if use_cache != "live" and _cache:
                 t0 = time.time()
-                cached_tree = _cache.latest_tree(None)
-                if cached_tree:
-                    # build jmespath expression from query params
-                    if by == "auto_id":
-                        # search depth 1 and 2 with null-safe contains
-                        flat = jmespath.search(f"children[?id && contains(id, '{query}')]", cached_tree) or []
-                        deep = jmespath.search(f"children[].children[?id && contains(id, '{query}')][]", cached_tree) or []
-                        all_matches = flat + deep
-                    elif by == "text":
-                        flat = jmespath.search(f"children[?text && contains(text, '{query}')]", cached_tree) or []
-                        deep = jmespath.search(f"children[].children[?text && contains(text, '{query}')][]", cached_tree) or []
-                        all_matches = flat + deep
-                    else:
-                        all_matches = []
-                    for m in all_matches:
-                        # resolve index path by walking cached tree
-                        path = _find_path_in_json(cached_tree, m)
-                        results.append({
-                            "path": path or "",
-                            "text": m.get("text", ""),
-                            "type": m.get("type", ""),
-                            "auto_id": m.get("id", ""),
-                        })
+                # search ALL cached trees (root and subtrees)
+                all_matches = []
+                rows = _cache._conn.execute(
+                    "SELECT path, response FROM observations WHERE endpoint='/tree' "
+                    "ORDER BY created_at DESC"
+                ).fetchall()
+                seen_ids = set()
+                for row in rows:
+                    cached_tree = json.loads(row["response"])
+                    base_path = row["path"] or ""
+                    _search_json_recursive(cached_tree, query, by, base_path, all_matches, seen_ids)
+                for m in all_matches:
+                    results.append(m)
                 ms = int((time.time() - t0) * 1000)
                 if results:
                     source = "cache"
