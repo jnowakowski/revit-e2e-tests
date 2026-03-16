@@ -959,6 +959,17 @@ class Handler(BaseHTTPRequestHandler):
                         log.info("CLICK auto_id=%r: resolved path=%s, wrapper CACHED", auto_id, entry_path)
 
                 if not elem:
+                    # nuclear option: clear everything and try fresh
+                    log.info("CLICK auto_id=%r: all caches stale, full reset...", auto_id)
+                    _clear_wrappers()
+                    _deep_scan()
+                    entries = resolve_auto_id(auto_id, control_type=ctype)
+                    if entries:
+                        entry_path = entries[0]["path"]
+                        elem = get_element_by_path(entry_path)
+                        if elem:
+                            _wrappers[cache_key] = elem
+                if not elem:
                     self.respond({"clicked": False, "error": f"auto_id {auto_id!r} not resolved"})
                     return
 
