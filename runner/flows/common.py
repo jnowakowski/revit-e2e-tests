@@ -105,40 +105,79 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
             return False, f"Command not found in flyout"
 
     # -- Step 4: wait for result ------------------------------------------
-    log("waiting for result...")
+    # Monitor plugin log file instead of polling UIA tree (faster, reliable)
+    import os
+    log_file = os.path.expanduser(f"~/Documents/AutoDetailViews-{result_title_match}.log")
+    log(f"waiting for result (watching {log_file})...")
+
+    # get initial log size to detect new content
+    try:
+        initial_size = os.path.getsize(log_file)
+    except FileNotFoundError:
+        initial_size = 0
+
     deadline = start + timeout
     poll = 0
+    last_line = ""
     while time.time() < deadline:
-        time.sleep(2)
+        time.sleep(1)
         poll += 1
-        # cheap poll: check child[0] title
-        first = api.tree(path="0", depth=0)
-        ft = first.get("text", "")
-        if result_title_match not in ft and "Command Failure" not in ft:
-            if poll % 5 == 0:
-                h = api.health()
-                log(f"  [{t():.0f}s] {h.get('state')} mem={h.get('process',{}).get('memory_mb')}MB (poll {poll})")
+
+        try:
+            with open(log_file, "r") as f:
+                content = f.read()
+        except FileNotFoundError:
             continue
 
-        # found -- get details
-        log(f"  result: {ft!r}")
-        detail = api.tree(path="0", depth=1)
-        result_text = ""
-        for c in detail.get("children", []):
-            if c.get("id") in ("ContentText", "MainInstruction"):
-                txt = c.get("text", "")
-                if txt.strip():
-                    result_text += txt + " "
-        result_text = result_text.strip()
-        log(f"  {result_text}")
+        lines = content.strip().splitlines()
+        if not lines:
+            continue
 
-        if "Command Failure" in ft:
-            return False, f"Command failure: {result_text}"
+        # show progress from log
+        current_last = lines[-1]
+        if current_last != last_line:
+            last_line = current_last
+            log(f"  {current_last.strip()}")
 
-        errors = 0
-        m = re.search(r"(\d+)\s+errors?", result_text)
-        if m:
-            errors = int(m.group(1))
-        return errors == 0, result_text
+        # check if finished
+        if "=== Finished" in content or "Elapsed:" in content:
+            # parse result from log
+            errors = 0
+            warnings = 0
+            steps = 0
+            for line in lines:
+                if "[ERROR]" in line:
+                    errors += 1
+                if "[WARN]" in line:
+                    warnings += 1
+                if "[INFO]" in line:
+                    steps += 1
+
+            # also try reading result dialog (may still be open)
+            api._get("/clear-children-cache")
+            first = api.tree(path="0", depth=0)
+            ft = first.get("text", "")
+            result_text = ""
+            if result_title_match in ft or "Command Failure" in ft:
+                detail = api.tree(path="0", depth=1)
+                for c in detail.get("children", []):
+                    if c.get("id") in ("ContentText", "MainInstruction"):
+                        txt = c.get("text", "")
+                        if txt.strip():
+                            result_text += txt + " "
+                result_text = result_text.strip()
+
+            if not result_text:
+                result_text = f"{steps} steps, {warnings} warnings, {errors} errors (from log)"
+
+            log(f"  DONE: {result_text}")
+
+            if "Command Failure" in ft:
+                return False, f"Command failure: {result_text}"
+            return errors == 0, result_text
+
+        if poll % 10 == 0:
+            h = api.health()
+            log(f"  [{t():.0f}s] {h.get('state')} mem={h.get('process',{}).get('memory_mb')}MB (poll {poll})")
 
     return False, "Timeout"

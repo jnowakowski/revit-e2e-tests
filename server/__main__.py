@@ -836,6 +836,11 @@ class Handler(BaseHTTPRequestHandler):
             log.info("GET /resolve  auto_id=%r type=%s  hits=%d", aid, ctype, len(entries))
             self.respond({"auto_id": aid, "type": ctype, "results": entries})
 
+        elif parsed.path == "/clear-children-cache":
+            _children_cache.clear()
+            _path_wrapper_cache.clear()
+            self.respond({"cleared": True})
+
         elif parsed.path == "/windows":
             ensure_connected()
             wins = []
