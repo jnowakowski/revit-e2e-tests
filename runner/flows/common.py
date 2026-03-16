@@ -58,8 +58,9 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
                 break
     except Exception:
         pass
+    # re-focus right before clicking (focus may be lost during slow search)
     main_win.set_focus()
-    time.sleep(0.3)
+    time.sleep(0.5)
     ui.click(btn or panel, "click_input")
     time.sleep(1)
     log("Panel clicked.")
@@ -117,9 +118,21 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
     while time.time() < deadline:
         time.sleep(2)
         try:
-            first = main_win.children()[0]
-            ft = first.window_text()
-            if result_title_match in ft or "Command Failure" in ft:
+            result_child = None
+            ft = ""
+            for child in main_win.children():
+                try:
+                    ct = child.window_text()
+                    if result_title_match in ct or "Command Failure" in ct:
+                        result_child = child
+                        ft = ct
+                        break
+                except Exception:
+                    pass
+            if not result_child:
+                continue
+            first = result_child
+            if True:
                 snap("05_result")
                 result_text = ""
                 for c in first.children():

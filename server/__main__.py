@@ -8,10 +8,12 @@ Usage:
 
 import argparse
 import json
+import logging
 import re
 import sys
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 try:
@@ -21,6 +23,48 @@ except ImportError:
     sys.exit(2)
 
 from server.cache import Cache
+
+LOG_PATH = Path(__file__).resolve().parent.parent / "server.log"
+
+log = logging.getLogger("revit-remote")
+
+
+def _setup_logging():
+    log.setLevel(logging.DEBUG)
+    fmt = logging.Formatter("[%(asctime)s] %(levelname)-5s  %(message)s", datefmt="%H:%M:%S")
+    # file handler -- tail -f server.log
+    fh = logging.FileHandler(str(LOG_PATH), encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+    log.addHandler(fh)
+    # console -- only warnings+
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.WARNING)
+    ch.setFormatter(fmt)
+    log.addHandler(ch)
+
+
+# ── Stats ────────────────────────────────────────────────────────────
+
+class _Stats:
+    __slots__ = ("live", "cache_hit", "errors", "_start")
+
+    def __init__(self):
+        self.live = 0
+        self.cache_hit = 0
+        self.errors = 0
+        self._start = time.time()
+
+    def summary(self):
+        total = self.live + self.cache_hit
+        uptime = int(time.time() - self._start)
+        h, m, s = uptime // 3600, (uptime % 3600) // 60, uptime % 60
+        return (
+            f"reqs={total} live={self.live} cache={self.cache_hit} "
+            f"errors={self.errors} uptime={h:02d}:{m:02d}:{s:02d}"
+        )
+
+_stats = _Stats()
 
 
 # ── Revit connection ─────────────────────────────────────────────────
@@ -211,8 +255,7 @@ def click_element(path=None, text=None, parent_path=None, method="invoke"):
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        # quieter logging
-        print(f"[{time.strftime('%H:%M:%S')}] {args[0]}")
+        pass  # we do our own logging
 
     def respond(self, data, status=200):
         body = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
@@ -221,6 +264,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+        if status >= 400:
+            _stats.errors += 1
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -230,6 +275,8 @@ class Handler(BaseHTTPRequestHandler):
             result = ensure_connected()
             if _main_win:
                 result["window"] = _main_win.window_text()
+            result["stats"] = _stats.summary()
+            log.info("GET /status  [%s]", _stats.summary())
             self.respond(result)
 
         elif parsed.path == "/tree":
@@ -245,9 +292,13 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond({"error": f"Path {parent_path} not found"}, 404)
                     return
 
+            t0 = time.time()
             tree = elem_to_dict(target, depth=depth, max_children=max_kids)
+            ms = int((time.time() - t0) * 1000)
+            _stats.live += 1
             if _cache:
                 _cache.record(_doc_title(), "/tree", tree, path=parent_path)
+            log.info("LIVE /tree  depth=%d path=%s  %dms  [%s]", depth, parent_path, ms, _stats.summary())
             self.respond(tree)
 
         elif parsed.path == "/inspect":
@@ -260,9 +311,13 @@ class Handler(BaseHTTPRequestHandler):
             if not target:
                 self.respond({"error": f"Path {path} not found"}, 404)
                 return
+            t0 = time.time()
             result = elem_inspect(target)
+            ms = int((time.time() - t0) * 1000)
+            _stats.live += 1
             if _cache:
                 _cache.record(_doc_title(), "/inspect", result, path=path)
+            log.info("LIVE /inspect  path=%s  %dms  [%s]", path, ms, _stats.summary())
             self.respond(result)
 
         elif parsed.path == "/search":
@@ -315,10 +370,14 @@ class Handler(BaseHTTPRequestHandler):
                     if depth < max_depth:
                         search_recursive(child, child_path, depth + 1)
 
+            t0 = time.time()
             search_recursive(target, scope or "", 0)
+            ms = int((time.time() - t0) * 1000)
+            _stats.live += 1
             search_result = {"query": query, "by": by, "results": results}
             if _cache:
                 _cache.record(_doc_title(), "/search", search_result, path=scope, query=query)
+            log.info("LIVE /search  q=%r by=%s hits=%d  %dms  [%s]", query, by, len(results), ms, _stats.summary())
             self.respond(search_result)
 
         elif parsed.path == "/windows":
@@ -329,20 +388,28 @@ class Handler(BaseHTTPRequestHandler):
                     wins.append(w.window_text())
                 except Exception:
                     pass
+            _stats.live += 1
+            log.info("LIVE /windows  count=%d  [%s]", len(wins), _stats.summary())
             self.respond({"windows": wins})
 
         # ── Cache endpoints (read from SQLite, no Revit needed) ──────
         elif parsed.path == "/cache/documents":
-            self.respond({"documents": _cache.documents()} if _cache else {"error": "cache disabled"})
+            _stats.cache_hit += 1
+            docs = _cache.documents() if _cache else []
+            log.info("CACHE /cache/documents  docs=%d  [%s]", len(docs), _stats.summary())
+            self.respond({"documents": docs} if _cache else {"error": "cache disabled"})
 
         elif parsed.path == "/cache/history":
             if not _cache:
                 self.respond({"error": "cache disabled"})
                 return
+            _stats.cache_hit += 1
             doc = qs.get("document", [None])[0]
             endpoint = qs.get("endpoint", [None])[0]
             limit = int(qs.get("limit", ["50"])[0])
-            self.respond({"history": _cache.history(document=doc, endpoint=endpoint, limit=limit)})
+            rows = _cache.history(document=doc, endpoint=endpoint, limit=limit)
+            log.info("CACHE /cache/history  doc=%s endpoint=%s rows=%d  [%s]", doc, endpoint, len(rows), _stats.summary())
+            self.respond({"history": rows})
 
         elif parsed.path == "/cache/search":
             if not _cache:
@@ -352,9 +419,12 @@ class Handler(BaseHTTPRequestHandler):
             if not term:
                 self.respond({"error": "Provide ?q=search_term"}, 400)
                 return
+            _stats.cache_hit += 1
             doc = qs.get("document", [None])[0]
             limit = int(qs.get("limit", ["50"])[0])
-            self.respond({"results": _cache.search(term, document=doc, limit=limit)})
+            rows = _cache.search(term, document=doc, limit=limit)
+            log.info("CACHE /cache/search  q=%r hits=%d  [%s]", term, len(rows), _stats.summary())
+            self.respond({"results": rows})
 
         elif parsed.path == "/cache/observation":
             if not _cache:
@@ -364,7 +434,9 @@ class Handler(BaseHTTPRequestHandler):
             if not obs_id:
                 self.respond({"error": "Provide ?id=N"}, 400)
                 return
+            _stats.cache_hit += 1
             obs = _cache.get_observation(int(obs_id))
+            log.info("CACHE /cache/observation  id=%s found=%s  [%s]", obs_id, obs is not None, _stats.summary())
             if not obs:
                 self.respond({"error": "Not found"}, 404)
                 return
@@ -387,16 +459,21 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(content_len))
 
         if parsed.path == "/click":
+            _stats.live += 1
             result = click_element(
                 path=body.get("path"),
                 text=body.get("text"),
                 parent_path=body.get("parent_path"),
                 method=body.get("method", "invoke"),
             )
+            log.info("LIVE /click  path=%s text=%r method=%s ok=%s  [%s]",
+                     body.get("path"), body.get("text"), body.get("method", "invoke"),
+                     result.get("clicked"), _stats.summary())
             self.respond(result)
 
         elif parsed.path == "/connect":
             result = connect()
+            log.info("POST /connect  result=%s", result)
             self.respond(result)
 
         else:
@@ -413,18 +490,26 @@ def main():
     parser.add_argument("--no-cache", action="store_true", help="Disable SQLite cache")
     args = parser.parse_args()
 
+    _setup_logging()
+    log.info("=" * 60)
+    log.info("Server starting on port %d", args.port)
+
     # init cache
     if not args.no_cache:
         _cache = Cache()
+        log.info("Cache: %s", _cache._path)
         print(f"Cache: {_cache._path}")
     else:
+        log.info("Cache: disabled")
         print("Cache: disabled")
 
     # connect on startup
     print("Connecting to Revit...")
     result = connect()
+    log.info("Revit connection: %s", result)
     print(f"  {result}")
 
+    print(f"Log: {LOG_PATH}  (tail -f server.log)")
     server = HTTPServer(("127.0.0.1", args.port), Handler)
     print(f"Listening on http://127.0.0.1:{args.port}")
     print(f"  GET  /status  /tree  /inspect  /search  /windows")
@@ -433,6 +518,7 @@ def main():
     try:
         server.serve_forever()
     except KeyboardInterrupt:
+        log.info("Shutting down.  Final stats: %s", _stats.summary())
         if _cache:
             _cache.close()
         print("\nShutting down.")

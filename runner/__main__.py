@@ -53,7 +53,8 @@ def main():
     # Screenshots dir
     screenshots_dir = None
     if args.screenshots:
-        screenshots_dir = os.path.join(os.path.dirname(__file__), "..", "screenshots", args.flow)
+        screenshots_dir = os.path.join(
+            os.path.expanduser("~"), "Documents", "revit-e2e-screenshots", args.flow)
         os.makedirs(screenshots_dir, exist_ok=True)
 
     # Run flow
