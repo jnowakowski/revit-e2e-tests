@@ -74,53 +74,35 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
         return False, f"Graftd: {r.get('error')}"
     time.sleep(1)
 
-    # -- Step 2: panel click ----------------------------------------------
-    log(f"click panel {panel_auto_id}")
-    r = api.click(auto_id=panel_auto_id, control_type="Button", method="focus_click")
+    # -- Step 2+3: panel click + flyout command (one-shot server-side) -----
+    # Flyout lives ~3s, HTTP round-trips kill it. Server does it all in one call.
+    CMD_PATH_IN_FLYOUT = "1.0.0.0"  # ListBox -> DataItem -> Custom -> Button
+    log(f"click panel {panel_auto_id} + command (flyout path={CMD_PATH_IN_FLYOUT})")
+    r = api._post("/click-panel-command", {
+        "panel_auto_id": panel_auto_id,
+        "cmd_path": CMD_PATH_IN_FLYOUT,
+    })
+    log(f"  -> clicked={r.get('clicked')} text={r.get('text')!r} ({r.get('error','')})")
     if not r.get("clicked"):
-        log(f"  Button miss, trying Custom...")
-        r = api.click(auto_id=panel_auto_id, control_type="Custom", method="focus_click")
-    log(f"  -> clicked={r.get('clicked')} path={r.get('path')} ({r.get('error','')})")
-    if not r.get("clicked"):
-        return False, f"Panel: {r.get('error')}"
-    time.sleep(1)
-
-    # -- Step 3: command in flyout ----------------------------------------
-    # Flyout is ephemeral (~3s). Don't fetch its tree. Click known path.
-    # Flyout structure is always: [0]=Dialog -> [1]=ListBox -> [0]=DataItem -> [0]=Custom -> [0]=Button
-    # So command button is at path 0.1.0.0.0 relative to main window
-    FLYOUT_CMD_PATH = "0.1.0.0.0"
-    log(f"click {cmd_auto_id} in flyout (path={FLYOUT_CMD_PATH})")
-    cmd_clicked = False
-    panel_retried = False
-    for attempt in range(15):
-        # quick check: is child[0] the flyout?
-        first = api.tree(path="0", depth=0)
-        aid = first.get("id", "")
-        if "SlideOutPanelPopup" in aid or "PopupRoot" in aid:
-            # flyout is open -- click command immediately
-            log(f"  flyout found (attempt {attempt+1}), clicking {FLYOUT_CMD_PATH}...")
-            r = api.click(path=FLYOUT_CMD_PATH, method="click_input")
-            log(f"  -> clicked={r.get('clicked')} text={r.get('text')!r}")
-            if r.get("clicked"):
-                cmd_clicked = True
-                break
-            else:
-                log(f"  click miss, flyout may have closed")
-        else:
-            if attempt == 0:
-                log(f"  flyout not at [0] yet (got {first.get('type')}:{aid[:30]})")
-            # re-click panel after a few misses
-            if attempt == 3 and not panel_retried:
-                panel_retried = True
-                log(f"  re-clicking panel...")
-                api.click(auto_id=panel_auto_id, control_type="Button", method="focus_click")
-                time.sleep(1)
-                continue
-        time.sleep(0.5)
-
-    if not cmd_clicked:
-        return False, f"Command {cmd_auto_id} not found"
+        # fallback: try old way (separate clicks)
+        log(f"  one-shot failed, trying separate clicks...")
+        r = api.click(auto_id=panel_auto_id, control_type="Button", method="focus_click")
+        if not r.get("clicked"):
+            r = api.click(auto_id=panel_auto_id, control_type="Custom", method="focus_click")
+        if not r.get("clicked"):
+            return False, f"Panel: {r.get('error')}"
+        time.sleep(1)
+        # try flyout command
+        for attempt in range(10):
+            first = api.tree(path="0", depth=0)
+            aid = first.get("id", "")
+            if "SlideOutPanelPopup" in aid:
+                r = api.click(path=f"0.{CMD_PATH_IN_FLYOUT}", method="click_input")
+                if r.get("clicked"):
+                    break
+            time.sleep(0.5)
+        if not r.get("clicked"):
+            return False, f"Command not found in flyout"
 
     # -- Step 4: wait for result ------------------------------------------
     log("waiting for result...")
