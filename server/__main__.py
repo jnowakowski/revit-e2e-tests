@@ -846,14 +846,8 @@ class Handler(BaseHTTPRequestHandler):
                 # 1. Try cached wrapper (instant)
                 elem = None
                 if cache_key in _wrappers:
-                    try:
-                        w = _wrappers[cache_key]
-                        w.window_text()  # verify alive
-                        elem = w
-                        log.info("CLICK auto_id=%r: wrapper cache HIT", auto_id)
-                    except Exception:
-                        del _wrappers[cache_key]
-                        log.info("CLICK auto_id=%r: wrapper stale, removed", auto_id)
+                    elem = _wrappers[cache_key]
+                    log.info("CLICK auto_id=%r: wrapper cache HIT", auto_id)
 
                 # 2. Resolve from id_map + walk path (slow but only once)
                 entry_path = ""
