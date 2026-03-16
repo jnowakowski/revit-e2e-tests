@@ -22,6 +22,12 @@ except ImportError:
     print("ERROR: pywinauto not installed. Run: pip install pywinauto")
     sys.exit(2)
 
+try:
+    import jmespath
+except ImportError:
+    print("ERROR: jmespath not installed. Run: pip install jmespath")
+    sys.exit(2)
+
 from server.cache import Cache
 
 LOG_PATH = Path(__file__).resolve().parent.parent / "server.log"
@@ -192,6 +198,35 @@ def get_element_by_path(path):
             return None
         current = kids[idx]
     return current
+
+
+def _find_elem_by_dict(parent, target_dict, max_depth=3, _depth=0):
+    """Find a live UIA element matching a dict from elem_to_dict (by text+type+id)."""
+    try:
+        kids = parent.children()
+    except Exception:
+        return None
+    for child in kids:
+        try:
+            match = True
+            if "text" in target_dict and child.window_text()[:120] != target_dict["text"]:
+                match = False
+            if "type" in target_dict and child.friendly_class_name() != target_dict["type"]:
+                match = False
+            if "id" in target_dict:
+                aid = child.automation_id() or ""
+                if aid[:80] != target_dict["id"]:
+                    match = False
+            if match:
+                return child
+        except Exception:
+            pass
+    if _depth < max_depth:
+        for child in kids:
+            result = _find_elem_by_dict(child, target_dict, max_depth, _depth + 1)
+            if result:
+                return result
+    return None
 
 
 # ── Click ─────────────────────────────────────────────────────────────
@@ -380,6 +415,61 @@ class Handler(BaseHTTPRequestHandler):
             log.info("LIVE /search  q=%r by=%s hits=%d  %dms  [%s]", query, by, len(results), ms, _stats.summary())
             self.respond(search_result)
 
+        elif parsed.path == "/q":
+            # jmespath query on tree
+            # GET /q?s=children[?text=='Graftd']&depth=2&path=0
+            # GET /q?s=children[?contains(id,'Elevations')]&depth=3
+            selector = qs.get("s", [None])[0]
+            if not selector:
+                self.respond({"error": "Provide ?s=jmespath_expression"}, 400)
+                return
+            depth = int(qs.get("depth", ["2"])[0])
+            parent_path = qs.get("path", [None])[0]
+            use_cache = qs.get("cache", ["auto"])[0]  # auto, only, live
+
+            tree = None
+            source = "cache"
+
+            # try cache first (unless live forced)
+            if use_cache != "live" and _cache:
+                cached = _cache.latest_tree(parent_path, depth)
+                if cached:
+                    tree = cached
+
+            # live fetch if no cache or cache=live
+            if tree is None or use_cache == "live":
+                ensure_connected()
+                target = _main_win
+                if parent_path:
+                    target = get_element_by_path(parent_path)
+                    if not target:
+                        self.respond({"error": f"Path {parent_path} not found"}, 404)
+                        return
+                t0 = time.time()
+                tree = elem_to_dict(target, depth=depth)
+                ms = int((time.time() - t0) * 1000)
+                source = "live"
+                _stats.live += 1
+                if _cache:
+                    _cache.record(_doc_title(), "/tree", tree, path=parent_path)
+                log.info("LIVE /q fetch  depth=%d path=%s  %dms", depth, parent_path, ms)
+
+            if tree is None:
+                self.respond({"error": "No tree data available"}, 404)
+                return
+
+            # apply jmespath
+            try:
+                result = jmespath.search(selector, tree)
+            except Exception as e:
+                self.respond({"error": f"jmespath error: {e}", "selector": selector}, 400)
+                return
+
+            if source == "cache":
+                _stats.cache_hit += 1
+            log.info("%s /q  s=%r  source=%s  [%s]", source.upper(), selector, source, _stats.summary())
+            self.respond({"selector": selector, "source": source, "result": result})
+
         elif parsed.path == "/windows":
             ensure_connected()
             wins = []
@@ -460,14 +550,62 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/click":
             _stats.live += 1
-            result = click_element(
-                path=body.get("path"),
-                text=body.get("text"),
-                parent_path=body.get("parent_path"),
-                method=body.get("method", "invoke"),
-            )
-            log.info("LIVE /click  path=%s text=%r method=%s ok=%s  [%s]",
-                     body.get("path"), body.get("text"), body.get("method", "invoke"),
+            selector = body.get("selector")
+            if selector:
+                # jmespath selector click: find element by querying tree, get its path
+                # first resolve via /q logic to find the element path
+                ensure_connected()
+                depth = body.get("depth", 3)
+                parent_path = body.get("parent_path")
+                target = _main_win
+                if parent_path:
+                    target = get_element_by_path(parent_path)
+                    if not target:
+                        self.respond({"clicked": False, "error": f"Parent path {parent_path} not found"})
+                        return
+                tree = elem_to_dict(target, depth=depth)
+                try:
+                    match = jmespath.search(selector, tree)
+                except Exception as e:
+                    self.respond({"clicked": False, "error": f"jmespath error: {e}"})
+                    return
+                if not match:
+                    self.respond({"clicked": False, "error": f"Selector matched nothing: {selector}"})
+                    return
+                # find the matching element in actual UIA tree by walking children
+                item = match[0] if isinstance(match, list) else match
+                elem = _find_elem_by_dict(target, item, depth)
+                if not elem:
+                    self.respond({"clicked": False, "error": "Matched in JSON but could not resolve UIA element"})
+                    return
+                method = body.get("method", "invoke")
+                t = elem.window_text()
+                ct = elem.friendly_class_name()
+                try:
+                    if method == "invoke":
+                        try:
+                            elem.iface_invoke.Invoke()
+                        except Exception:
+                            elem.click_input()
+                    elif method == "focus_click":
+                        _main_win.set_focus()
+                        time.sleep(0.3)
+                        elem.click_input()
+                    else:
+                        elem.click_input()
+                    result = {"clicked": True, "text": t, "type": ct, "method": method, "selector": selector}
+                except Exception as e:
+                    result = {"clicked": False, "text": t, "type": ct, "error": str(e)}
+            else:
+                result = click_element(
+                    path=body.get("path"),
+                    text=body.get("text"),
+                    parent_path=body.get("parent_path"),
+                    method=body.get("method", "invoke"),
+                )
+            log.info("LIVE /click  path=%s text=%r selector=%r method=%s ok=%s  [%s]",
+                     body.get("path"), body.get("text"), body.get("selector"),
+                     body.get("method", "invoke"),
                      result.get("clicked"), _stats.summary())
             self.respond(result)
 

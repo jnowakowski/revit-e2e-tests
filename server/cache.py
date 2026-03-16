@@ -99,6 +99,23 @@ class Cache:
         d["response"] = json.loads(d["response"])
         return d
 
+    def latest_tree(self, path=None, min_depth=1):
+        """Get most recent /tree response for given path, or None."""
+        if path:
+            row = self._conn.execute(
+                "SELECT response FROM observations WHERE endpoint='/tree' AND path=? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (path,)
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT response FROM observations WHERE endpoint='/tree' AND path IS NULL "
+                "ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        if not row:
+            return None
+        return json.loads(row["response"])
+
     def search(self, term, document=None, limit=50):
         """Full-text search across cached responses."""
         sql = "SELECT id, document, endpoint, path, query, created_at FROM observations WHERE response LIKE ?"
