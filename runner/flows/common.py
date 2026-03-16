@@ -104,19 +104,50 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
     time.sleep(1)
 
     # -- Step 3: Click command in flyout ----------------------------------
-    log(f"Step 3: Click command (auto_id contains {cmd_auto_id})")
-    # poll: flyout appears as child, triggers deep scan -> id_map update
+    log(f"Step 3: Click command in flyout ({cmd_auto_id})")
+    # flyout is ephemeral -- don't use id_map. Find it directly:
+    # flyout = first child with "SlideOutPanelPopup" in auto_id
+    # command = search within flyout by auto_id
     cmd_clicked = False
     for attempt in range(15):
-        # trigger tree fetch to update cache/map with flyout
-        api.tree(depth=2)
-        r = api.click(auto_id=cmd_auto_id, control_type="Button", method="click_input")
-        if r.get("clicked"):
-            log(f"  OK path={r.get('path')} (attempt {attempt+1})")
-            cmd_clicked = True
-            break
-        if attempt == 0:
-            log(f"  Not found yet, polling...")
+        # get children[0] and check if it's the flyout
+        t0 = time.time()
+        tree = api.tree(path="0", depth=4)  # child[0] with depth=4
+        dt = time.time() - t0
+        aid = tree.get("id", "")
+        if "SlideOutPanelPopup" in aid or "PopupRoot" in aid:
+            log(f"  Flyout found at [0] ({dt:.1f}s, attempt {attempt+1})")
+            # search for command button inside flyout tree (JSON only, no UIA)
+            import jmespath
+            matches = jmespath.search(
+                f"children[].children[].children[?id && contains(id, '{cmd_auto_id}')][]",
+                tree
+            ) or []
+            if not matches:
+                # try one more level
+                matches = jmespath.search(
+                    f"children[].children[].children[].children[?id && contains(id, '{cmd_auto_id}')][]",
+                    tree
+                ) or []
+            if matches:
+                # found -- now click by path within flyout
+                from server.__main__ import _find_path_in_json
+                cmd_path = _find_path_in_json(tree, matches[0])
+                if cmd_path:
+                    full_path = f"0.{cmd_path}"
+                    log(f"  Command at path={full_path}")
+                    r = api.click(path=full_path, method="click_input")
+                    if r.get("clicked"):
+                        log(f"  OK clicked")
+                        cmd_clicked = True
+                        break
+                    else:
+                        log(f"  Click failed: {r.get('error')}")
+            else:
+                log(f"  Flyout open but command not found in tree")
+        else:
+            if attempt == 0:
+                log(f"  Flyout not at [0] (got {aid!r}), polling... ({dt:.1f}s)")
         time.sleep(0.5)
 
     if not cmd_clicked:
