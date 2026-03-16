@@ -45,7 +45,7 @@ def _setup_logging():
     log.addHandler(fh)
     # console -- only warnings+
     ch = logging.StreamHandler()
-    ch.setLevel(logging.WARNING)
+    ch.setLevel(logging.INFO)
     ch.setFormatter(fmt)
     log.addHandler(ch)
 
