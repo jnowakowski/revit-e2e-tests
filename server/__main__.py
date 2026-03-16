@@ -274,7 +274,9 @@ def _clear_wrappers():
     """Clear cached wrappers (on reconnect, dialog change, etc.)."""
     global _wrappers
     _wrappers.clear()
-    log.info("WRAPPERS: cleared")
+    _path_wrapper_cache.clear()
+    _children_cache.clear()
+    log.info("WRAPPERS: all caches cleared")
 
 
 def _rebuild_id_map():
@@ -441,16 +443,39 @@ def _cached_children(elem):
     return kids
 
 
+_path_wrapper_cache = {}  # "4.13" -> wrapper
+
 def get_element_by_path(path):
-    """Navigate to an element by index path like '4.13' (child 4, then child 13)."""
+    """Navigate to an element by index path like '4.13'. Caches each resolved path."""
+    # check path cache first
+    if path in _path_wrapper_cache:
+        w = _path_wrapper_cache[path]
+        try:
+            w.friendly_class_name()  # quick alive check (cheaper than window_text)
+            return w
+        except Exception:
+            del _path_wrapper_cache[path]
+
     ensure_connected()
     current = _main_win
+    partial = ""
     for idx_str in path.split("."):
         idx = int(idx_str)
+        partial = f"{partial}.{idx_str}" if partial else idx_str
+        # check partial path cache
+        if partial in _path_wrapper_cache:
+            try:
+                cached = _path_wrapper_cache[partial]
+                cached.friendly_class_name()
+                current = cached
+                continue
+            except Exception:
+                del _path_wrapper_cache[partial]
         kids = _cached_children(current)
         if idx >= len(kids):
             return None
         current = kids[idx]
+        _path_wrapper_cache[partial] = current
     return current
 
 
@@ -1015,6 +1040,77 @@ class Handler(BaseHTTPRequestHandler):
                      body.get("path"), body.get("text"), body.get("selector"),
                      body.get("method", "invoke"),
                      result.get("clicked"), _stats.summary())
+            self.respond(result)
+
+        elif parsed.path == "/click-panel-command":
+            # One-shot: click collapsed panel, wait for flyout, click command
+            # POST /click-panel-command {"panel_auto_id":"...", "cmd_path":"0.1.0.0.0"}
+            _stats.live += 1
+            ensure_connected()
+            p_aid = body.get("panel_auto_id")
+            cmd_path_in_flyout = body.get("cmd_path", "1.0.0.0")  # relative to flyout
+            method = body.get("method", "focus_click")
+
+            # 1. Click panel (from wrapper cache if available)
+            cache_key = f"{p_aid}:Button"
+            elem = _wrappers.get(cache_key)
+            if not elem:
+                entries = resolve_auto_id(p_aid, control_type="Button")
+                if entries:
+                    elem = get_element_by_path(entries[0]["path"])
+                    if elem:
+                        _wrappers[cache_key] = elem
+            if not elem:
+                self.respond({"clicked": False, "error": f"Panel {p_aid} not found"})
+                return
+
+            _main_win.set_focus()
+            time.sleep(0.3)
+            elem.click_input()
+            log.info("CLICK-PANEL-CMD: panel clicked (%s)", p_aid)
+
+            # 2. Wait for flyout (poll children[0], max 3s)
+            flyout = None
+            for _ in range(6):
+                time.sleep(0.5)
+                _children_cache.clear()  # force fresh children
+                try:
+                    kids = _main_win.children()
+                    if kids:
+                        aid = ""
+                        try:
+                            aid = kids[0].automation_id()
+                        except Exception:
+                            pass
+                        if "SlideOutPanelPopup" in aid or "PopupRoot" in aid:
+                            flyout = kids[0]
+                            break
+                except Exception:
+                    pass
+
+            if not flyout:
+                self.respond({"clicked": False, "error": "Flyout did not appear"})
+                return
+
+            log.info("CLICK-PANEL-CMD: flyout found")
+
+            # 3. Click command inside flyout by relative path
+            current = flyout
+            for idx_str in cmd_path_in_flyout.split("."):
+                try:
+                    kids = current.children()
+                    current = kids[int(idx_str)]
+                except Exception:
+                    self.respond({"clicked": False, "error": f"Command path {cmd_path_in_flyout} failed"})
+                    return
+
+            try:
+                t = current.window_text()
+                current.click_input()
+                result = {"clicked": True, "text": t, "panel": p_aid, "cmd_path": cmd_path_in_flyout}
+                log.info("CLICK-PANEL-CMD: command clicked (%s)", t)
+            except Exception as e:
+                result = {"clicked": False, "error": str(e)}
             self.respond(result)
 
         elif parsed.path == "/connect":
