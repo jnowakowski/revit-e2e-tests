@@ -58,27 +58,48 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
                 break
     except Exception:
         pass
+    main_win.set_focus()
+    time.sleep(0.3)
     ui.click(btn or panel, "click_input")
     time.sleep(1)
     log("Panel clicked.")
     snap("03_flyout")
 
-    # Step 3: Click command in flyout
+    # Step 3: Click command in flyout (poll up to 10s for popup to appear)
     log(f"Clicking command {cmd_auto_id}...")
-    try:
-        first = main_win.children()[0]
-    except (IndexError, Exception) as e:
-        log(f"FAIL: Could not get first child: {e}")
-        return False, "Could not get first child"
+    first = None
+    flyout_deadline = time.time() + 10
+    while time.time() < flyout_deadline:
+        try:
+            children = main_win.children()
+        except Exception:
+            time.sleep(0.5)
+            continue
+        for candidate in children:
+            aid = ""
+            try:
+                aid = candidate.automation_id()
+            except Exception:
+                pass
+            if "SlideOutPanelPopup" in aid or "PopupRoot" in aid:
+                first = candidate
+                break
+        if first:
+            break
+        time.sleep(0.5)
 
-    aid = ""
-    try:
-        aid = first.automation_id()
-    except Exception:
-        pass
-
-    if "SlideOutPanelPopup" not in aid and "PopupRoot" not in aid:
-        log(f"FAIL: Flyout not found. First child: {aid!r}")
+    if first is None:
+        # Log top children for debugging
+        dbg_parts = []
+        try:
+            for i, c in enumerate(main_win.children()[:5]):
+                try:
+                    dbg_parts.append(f"[{i}] aid={c.automation_id()!r} cls={c.friendly_class_name()!r}")
+                except Exception:
+                    dbg_parts.append(f"[{i}] ???")
+        except Exception:
+            dbg_parts.append("(could not inspect)")
+        log(f"FAIL: Flyout not found after 10s. Children: {'; '.join(dbg_parts)}")
         return False, "Flyout not found"
 
     cmd = ui.find_by_auto_id(first, cmd_auto_id, depth=4)
@@ -112,10 +133,6 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
                         pass
                 result_text = result_text.strip()
                 log(f"Result: {result_text}")
-
-                close = ui.find_by_auto_id(first, "CommandButton", depth=2)
-                if close:
-                    ui.click(close, "click_input")
 
                 if "Command Failure" in ft:
                     return False, f"Command failure: {result_text}"

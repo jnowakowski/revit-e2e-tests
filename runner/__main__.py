@@ -38,6 +38,12 @@ def main():
         print(f"[runner] FAIL: Could not connect to Revit: {e}")
         sys.exit(2)
 
+    # Dismiss security dialogs before anything else
+    dismissed = ui.dismiss_security_dialogs(main_win)
+    if dismissed:
+        print(f"[runner] Dismissed {dismissed} security dialog(s).")
+        time.sleep(2)
+
     title = main_win.window_text()
     print(f"[runner] Connected: {title}")
 
