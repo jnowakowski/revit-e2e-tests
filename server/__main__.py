@@ -20,11 +20,14 @@ except ImportError:
     print("ERROR: pywinauto not installed. Run: pip install pywinauto")
     sys.exit(2)
 
+from server.cache import Cache
+
 
 # ── Revit connection ─────────────────────────────────────────────────
 
 _app = None
 _main_win = None
+_cache = None
 
 
 def connect():
@@ -55,6 +58,14 @@ def ensure_connected():
         _app = None
         _main_win = None
         return connect()
+
+
+def _doc_title():
+    """Current Revit window title (for cache tagging)."""
+    try:
+        return _main_win.window_text() if _main_win else None
+    except Exception:
+        return None
 
 
 # ── Tree exploration ──────────────────────────────────────────────────
@@ -235,6 +246,8 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
             tree = elem_to_dict(target, depth=depth, max_children=max_kids)
+            if _cache:
+                _cache.record(_doc_title(), "/tree", tree, path=parent_path)
             self.respond(tree)
 
         elif parsed.path == "/inspect":
@@ -247,7 +260,10 @@ class Handler(BaseHTTPRequestHandler):
             if not target:
                 self.respond({"error": f"Path {path} not found"}, 404)
                 return
-            self.respond(elem_inspect(target))
+            result = elem_inspect(target)
+            if _cache:
+                _cache.record(_doc_title(), "/inspect", result, path=path)
+            self.respond(result)
 
         elif parsed.path == "/search":
             ensure_connected()
@@ -300,7 +316,10 @@ class Handler(BaseHTTPRequestHandler):
                         search_recursive(child, child_path, depth + 1)
 
             search_recursive(target, scope or "", 0)
-            self.respond({"query": query, "by": by, "results": results})
+            search_result = {"query": query, "by": by, "results": results}
+            if _cache:
+                _cache.record(_doc_title(), "/search", search_result, path=scope, query=query)
+            self.respond(search_result)
 
         elif parsed.path == "/windows":
             ensure_connected()
@@ -312,10 +331,52 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             self.respond({"windows": wins})
 
+        # ── Cache endpoints (read from SQLite, no Revit needed) ──────
+        elif parsed.path == "/cache/documents":
+            self.respond({"documents": _cache.documents()} if _cache else {"error": "cache disabled"})
+
+        elif parsed.path == "/cache/history":
+            if not _cache:
+                self.respond({"error": "cache disabled"})
+                return
+            doc = qs.get("document", [None])[0]
+            endpoint = qs.get("endpoint", [None])[0]
+            limit = int(qs.get("limit", ["50"])[0])
+            self.respond({"history": _cache.history(document=doc, endpoint=endpoint, limit=limit)})
+
+        elif parsed.path == "/cache/search":
+            if not _cache:
+                self.respond({"error": "cache disabled"})
+                return
+            term = qs.get("q", [None])[0]
+            if not term:
+                self.respond({"error": "Provide ?q=search_term"}, 400)
+                return
+            doc = qs.get("document", [None])[0]
+            limit = int(qs.get("limit", ["50"])[0])
+            self.respond({"results": _cache.search(term, document=doc, limit=limit)})
+
+        elif parsed.path == "/cache/observation":
+            if not _cache:
+                self.respond({"error": "cache disabled"})
+                return
+            obs_id = qs.get("id", [None])[0]
+            if not obs_id:
+                self.respond({"error": "Provide ?id=N"}, 400)
+                return
+            obs = _cache.get_observation(int(obs_id))
+            if not obs:
+                self.respond({"error": "Not found"}, 404)
+                return
+            self.respond(obs)
+
         else:
             self.respond({"error": "Unknown endpoint", "endpoints": [
                 "GET /status", "GET /tree?depth=1&path=4",
-                "GET /windows", "POST /click"
+                "GET /windows", "GET /inspect?path=X.Y.Z",
+                "GET /search?q=term", "POST /click", "POST /connect",
+                "GET /cache/documents", "GET /cache/history",
+                "GET /cache/search?q=term", "GET /cache/observation?id=N",
             ]}, 404)
 
     def do_POST(self):
@@ -345,9 +406,19 @@ class Handler(BaseHTTPRequestHandler):
 # ── Main ──────────────────────────────────────────────────────────────
 
 def main():
+    global _cache
+
     parser = argparse.ArgumentParser(description="revit-remote server")
     parser.add_argument("--port", type=int, default=8520)
+    parser.add_argument("--no-cache", action="store_true", help="Disable SQLite cache")
     args = parser.parse_args()
+
+    # init cache
+    if not args.no_cache:
+        _cache = Cache()
+        print(f"Cache: {_cache._path}")
+    else:
+        print("Cache: disabled")
 
     # connect on startup
     print("Connecting to Revit...")
@@ -356,11 +427,14 @@ def main():
 
     server = HTTPServer(("127.0.0.1", args.port), Handler)
     print(f"Listening on http://127.0.0.1:{args.port}")
-    print(f"  GET  /status  /tree?depth=1&path=4  /windows")
+    print(f"  GET  /status  /tree  /inspect  /search  /windows")
+    print(f"  GET  /cache/documents  /cache/history  /cache/search  /cache/observation")
     print(f"  POST /click   /connect")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
+        if _cache:
+            _cache.close()
         print("\nShutting down.")
 
 
