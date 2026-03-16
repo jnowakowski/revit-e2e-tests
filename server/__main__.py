@@ -124,10 +124,50 @@ def ensure_connected():
         return connect()
 
 
+def _deep_scan():
+    """Build deep cache of Revit UI tree. Called after connect."""
+    if not _main_win or not _cache:
+        return
+    log.info("DEEP SCAN: starting...")
+    try:
+        # root depth=2 (main window children + their children)
+        t0 = time.time()
+        tree = elem_to_dict(_main_win, depth=2)
+        _cache.record(_doc_title(), "/tree", tree, path=None)
+        log.info("DEEP SCAN: root depth=2  %dms", int((time.time() - t0) * 1000))
+
+        # ListBox[0] depth=4 (ribbon tabs -> panels -> buttons)
+        t0 = time.time()
+        kids = _main_win.children()
+        if kids:
+            lb = kids[0]
+            lb_tree = elem_to_dict(lb, depth=4)
+            _cache.record(_doc_title(), "/tree", lb_tree, path="0")
+            log.info("DEEP SCAN: ListBox[0] depth=4  %dms", int((time.time() - t0) * 1000))
+
+        # mMainTabs depth=1 (tab buttons -- already in root but explicit)
+        for i, kid in enumerate(kids):
+            try:
+                aid = kid.automation_id()
+                if aid == "mMainTabs":
+                    t0 = time.time()
+                    tabs_tree = elem_to_dict(kid, depth=1)
+                    _cache.record(_doc_title(), "/tree", tabs_tree, path=str(i))
+                    log.info("DEEP SCAN: mMainTabs[%d] depth=1  %dms", i, int((time.time() - t0) * 1000))
+                    break
+            except Exception:
+                pass
+
+        log.info("DEEP SCAN: complete")
+    except Exception as e:
+        log.warning("DEEP SCAN: failed: %s", e)
+
+
 def _heartbeat_loop():
-    """Background thread: monitor Revit process, auto-reconnect."""
+    """Background thread: monitor Revit process, auto-reconnect, deep scan."""
     global _connected
     import psutil
+    _last_title = ""
     while True:
         time.sleep(3)
         # check if Revit process exists
@@ -141,22 +181,34 @@ def _heartbeat_loop():
                 _connected = False
                 globals()['_app'] = None
                 globals()['_main_win'] = None
+                _last_title = ""
             continue
 
         if not _connected:
             log.info("HEARTBEAT: Revit process found. Reconnecting...")
-            time.sleep(2)  # let Revit settle
+            time.sleep(2)
             result = connect()
-            log.info("HEARTBEAT: reconnect result: %s", result)
+            log.info("HEARTBEAT: reconnect: %s", result)
+            if _connected:
+                # deep scan after fresh connect
+                time.sleep(2)
+                _deep_scan()
             continue
 
-        # connected -- verify window still valid
+        # connected -- check for title changes (project loaded/changed)
         try:
             title = _main_win.window_text() if _main_win else ""
-            # if title changed (e.g. project loaded), log it
+            if title != _last_title:
+                if _last_title == "" and title:
+                    log.info("HEARTBEAT: Project loaded: %s. Refreshing cache...", title)
+                    _deep_scan()
+                elif title == "" and _last_title:
+                    log.info("HEARTBEAT: Project closed or Revit restarting.")
+                _last_title = title
         except Exception:
             log.info("HEARTBEAT: Window stale. Reconnecting...")
             _connected = False
+            _last_title = ""
             connect()
 
 
