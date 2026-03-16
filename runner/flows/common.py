@@ -87,50 +87,50 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
     # ── Step 1: Click Graftd tab ────────────────────────────────────
     log("Step 1: Clicking Graftd tab...")
     t0 = time.time()
-    r = api.click(selector="children[].children[?text=='Graftd'][]", method="invoke", depth=2)
+    search = api._get("/search?q=Graftd&by=auto_id&depth=2")
+    results = search.get("results", [])
     dt = time.time() - t0
-    if r.get("clicked"):
-        log(f"  Graftd clicked. text={r.get('text')!r} method={r.get('method')} ({dt:.1f}s)")
-    else:
-        log(f"  FAIL: {r.get('error')} ({dt:.1f}s)")
-        log(f"  response: {r}")
-        return False, f"Graftd tab click failed: {r.get('error')}"
+    graftd_path = None
+    for res in results:
+        if res.get("auto_id") == "Graftd" and res.get("type") == "Button":
+            graftd_path = res["path"]
+            break
+    if not graftd_path:
+        log(f"  FAIL: Graftd tab not found via /search ({dt:.1f}s)")
+        log(f"  search results: {results}")
+        return False, "Graftd tab not found"
+    log(f"  Found Graftd at path={graftd_path} ({dt:.1f}s)")
+    r = api.click(path=graftd_path, method="invoke")
+    log(f"  Click: clicked={r.get('clicked')} text={r.get('text')!r}")
+    if not r.get("clicked"):
+        return False, f"Graftd click failed: {r.get('error')}"
     time.sleep(1)
 
     # ── Step 2: Click collapsed panel ───────────────────────────────
     log(f"Step 2: Clicking panel {panel_auto_id}...")
     t0 = time.time()
-    r = api.click(
-        selector=f"children[].children[].children[].children[?contains(id, '{panel_auto_id}')][]",
-        method="click_input",
-        depth=6,
-    )
+    search = api._get(f"/search?q={panel_auto_id}&by=auto_id&depth=6")
+    results = search.get("results", [])
     dt = time.time() - t0
-    if r.get("clicked"):
-        log(f"  Panel clicked. text={r.get('text')!r} ({dt:.1f}s)")
-    else:
-        # fallback: try direct search
-        log(f"  Selector miss ({dt:.1f}s), trying /search...")
-        t0 = time.time()
-        search = api._get(f"/search?q={panel_auto_id}&by=auto_id&depth=6")
-        results = search.get("results", [])
-        dt2 = time.time() - t0
-        if results:
-            path = results[0]["path"]
-            log(f"  Found at path={path} ({dt2:.1f}s). Clicking...")
-            # find button child
-            tree = api.tree(path=path, depth=1)
-            btn_path = None
-            for i, child in enumerate(tree.get("children", [])):
-                if child.get("type") == "Button":
-                    btn_path = f"{path}.{i}"
-                    break
-            r = api.click(path=btn_path or path, method="click_input")
-            log(f"  click result: {r}")
-        else:
-            log(f"  FAIL: Panel not found. search took {dt2:.1f}s")
-            log(f"  search response: {search}")
-            return False, f"Panel {panel_auto_id} not found"
+    if not results:
+        log(f"  FAIL: Panel {panel_auto_id} not found ({dt:.1f}s)")
+        return False, f"Panel {panel_auto_id} not found"
+    panel_path = results[0]["path"]
+    log(f"  Found panel at path={panel_path} ({dt:.1f}s)")
+    # find Button child inside panel (collapsed icon)
+    t0 = time.time()
+    panel_tree = api.tree(path=panel_path, depth=1)
+    btn_path = panel_path
+    for i, child in enumerate(panel_tree.get("children", [])):
+        if child.get("type") == "Button":
+            btn_path = f"{panel_path}.{i}"
+            log(f"  Button child at {btn_path}")
+            break
+    r = api.click(path=btn_path, method="click_input")
+    dt2 = time.time() - t0
+    log(f"  Click: clicked={r.get('clicked')} text={r.get('text')!r} ({dt2:.1f}s)")
+    if not r.get("clicked"):
+        return False, f"Panel click failed: {r.get('error')}"
     time.sleep(1)
 
     # ── Step 3: Find and click command in flyout ────────────────────
