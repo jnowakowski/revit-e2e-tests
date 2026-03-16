@@ -276,9 +276,15 @@ def _index_tree(node, current_path, seen):
         _index_tree(child, child_path, seen)
 
 
+_id_map_last_check = 0
+
 def _check_id_map_valid():
-    """Check if id_map needs rebuild (child count changed = dialog appeared/disappeared)."""
-    global _id_map_child_count
+    """Check if id_map needs rebuild. Only checks every 10s to avoid slow children() calls."""
+    global _id_map_child_count, _id_map_last_check
+    now = time.time()
+    if now - _id_map_last_check < 10:
+        return  # checked recently, skip
+    _id_map_last_check = now
     try:
         if _main_win:
             count = len(_main_win.children())
