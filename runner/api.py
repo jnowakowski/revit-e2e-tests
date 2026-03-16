@@ -70,14 +70,24 @@ class RevitAPI:
         path = f"/q?s={urllib.request.quote(selector)}&depth={depth}&cache={cache}"
         return self._get(path)
 
-    def click(self, path=None, selector=None, method="invoke", depth=2):
+    def click(self, path=None, auto_id=None, control_type=None, selector=None, method="invoke", depth=2):
         body = {"method": method}
-        if path:
+        if auto_id:
+            body["auto_id"] = auto_id
+            if control_type:
+                body["type"] = control_type
+        elif path:
             body["path"] = path
-        if selector:
+        elif selector:
             body["selector"] = selector
             body["depth"] = depth
         return self._post("/click", body)
+
+    def resolve(self, auto_id, control_type=None):
+        qs = f"?auto_id={auto_id}"
+        if control_type:
+            qs += f"&type={control_type}"
+        return self._get(f"/resolve{qs}")
 
     def tree(self, path=None, depth=1):
         qs = f"?depth={depth}"

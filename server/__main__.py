@@ -158,6 +158,7 @@ def _deep_scan():
             except Exception:
                 pass
 
+        _rebuild_id_map()
         log.info("DEEP SCAN: complete")
     except Exception as e:
         log.warning("DEEP SCAN: failed: %s", e)
@@ -218,6 +219,84 @@ def _doc_title():
         return _main_win.window_text() if _main_win else None
     except Exception:
         return None
+
+
+# ── AutomationId map (built from cache) ──────────────────────────────
+
+_id_map = {}  # auto_id -> [{path, type, text}]
+_id_map_child_count = None  # track main window child count for invalidation
+
+
+def _rebuild_id_map():
+    """Rebuild auto_id -> path map from all cached trees."""
+    global _id_map, _id_map_child_count
+    _id_map = {}
+
+    if not _cache:
+        return
+
+    rows = _cache._conn.execute(
+        "SELECT path, response FROM observations WHERE endpoint='/tree' "
+        "ORDER BY created_at DESC"
+    ).fetchall()
+
+    seen = set()
+    for row in rows:
+        tree = json.loads(row["response"])
+        base = row["path"] or ""
+        _index_tree(tree, base, seen)
+
+    # track child count for invalidation
+    try:
+        if _main_win:
+            _id_map_child_count = len(_main_win.children())
+    except Exception:
+        pass
+
+    log.info("ID_MAP: rebuilt. %d auto_ids, %d entries, child_count=%s",
+             len(_id_map), sum(len(v) for v in _id_map.values()), _id_map_child_count)
+
+
+def _index_tree(node, current_path, seen):
+    """Recursively index auto_ids from a JSON tree node."""
+    aid = node.get("id", "")
+    if aid:
+        key = f"{aid}:{node.get('type','')}:{current_path}"
+        if key not in seen:
+            seen.add(key)
+            if aid not in _id_map:
+                _id_map[aid] = []
+            _id_map[aid].append({
+                "path": current_path,
+                "type": node.get("type", ""),
+                "text": node.get("text", ""),
+            })
+    for i, child in enumerate(node.get("children", [])):
+        child_path = f"{current_path}.{i}" if current_path else str(i)
+        _index_tree(child, child_path, seen)
+
+
+def _check_id_map_valid():
+    """Check if id_map needs rebuild (child count changed = dialog appeared/disappeared)."""
+    global _id_map_child_count
+    try:
+        if _main_win:
+            count = len(_main_win.children())
+            if count != _id_map_child_count:
+                log.info("ID_MAP: child count changed %s -> %s, rebuilding...",
+                         _id_map_child_count, count)
+                _rebuild_id_map()
+    except Exception:
+        pass
+
+
+def resolve_auto_id(auto_id, control_type=None):
+    """Look up auto_id in map. Returns list of {path, type, text}."""
+    _check_id_map_valid()
+    entries = _id_map.get(auto_id, [])
+    if control_type:
+        entries = [e for e in entries if e["type"] == control_type]
+    return entries
 
 
 # ── Tree exploration ──────────────────────────────────────────────────
@@ -648,6 +727,17 @@ class Handler(BaseHTTPRequestHandler):
             log.info("%s /q  s=%r  source=%s  [%s]", source.upper(), selector, source, _stats.summary())
             self.respond({"selector": selector, "source": source, "result": result})
 
+        elif parsed.path == "/resolve":
+            # GET /resolve?auto_id=Graftd&type=Button
+            aid = qs.get("auto_id", [None])[0]
+            if not aid:
+                self.respond({"error": "Provide ?auto_id=X"}, 400)
+                return
+            ctype = qs.get("type", [None])[0]
+            entries = resolve_auto_id(aid, control_type=ctype)
+            log.info("GET /resolve  auto_id=%r type=%s  hits=%d", aid, ctype, len(entries))
+            self.respond({"auto_id": aid, "type": ctype, "results": entries})
+
         elif parsed.path == "/windows":
             ensure_connected()
             wins = []
@@ -728,6 +818,56 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/click":
             _stats.live += 1
+
+            # auto_id click: resolve from map, click by path
+            auto_id = body.get("auto_id")
+            if auto_id:
+                ensure_connected()
+                ctype = body.get("type")
+                method = body.get("method", "invoke")
+                entries = resolve_auto_id(auto_id, control_type=ctype)
+                if not entries:
+                    log.info("CLICK auto_id=%r type=%s: not in map, trying live search...", auto_id, ctype)
+                    # fallback: deep scan + retry
+                    _deep_scan()
+                    entries = resolve_auto_id(auto_id, control_type=ctype)
+                if not entries:
+                    self.respond({"clicked": False, "error": f"auto_id {auto_id!r} not found"})
+                    return
+                entry = entries[0]
+                elem = get_element_by_path(entry["path"])
+                if not elem:
+                    log.info("CLICK auto_id=%r: path %s stale, rebuilding map...", auto_id, entry["path"])
+                    _rebuild_id_map()
+                    entries = resolve_auto_id(auto_id, control_type=ctype)
+                    if entries:
+                        elem = get_element_by_path(entries[0]["path"])
+                if not elem:
+                    self.respond({"clicked": False, "error": f"auto_id {auto_id!r} path stale"})
+                    return
+                t = elem.window_text()
+                ct = elem.friendly_class_name()
+                try:
+                    if method == "invoke":
+                        try:
+                            elem.iface_invoke.Invoke()
+                        except Exception:
+                            elem.click_input()
+                    elif method == "focus_click":
+                        _main_win.set_focus()
+                        time.sleep(0.3)
+                        elem.click_input()
+                    else:
+                        elem.click_input()
+                    result = {"clicked": True, "text": t, "type": ct, "method": method,
+                              "auto_id": auto_id, "path": entry["path"]}
+                except Exception as e:
+                    result = {"clicked": False, "text": t, "error": str(e)}
+                log.info("CLICK auto_id=%r path=%s ok=%s  [%s]",
+                         auto_id, entry["path"], result.get("clicked"), _stats.summary())
+                self.respond(result)
+                return
+
             selector = body.get("selector")
             if selector:
                 # jmespath selector click: find element by querying tree, get its path

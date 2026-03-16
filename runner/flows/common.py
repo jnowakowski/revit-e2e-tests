@@ -1,13 +1,13 @@
 """Shared logic for Graftd ribbon flows.
 
 All Revit interaction goes through the HTTP server (localhost:8520).
-Runner never touches pywinauto directly.
+Elements are addressed by AutomationId, never by index path.
 
 Flow:
-  1. Check /health -- is Revit ready?
-  2. Click Graftd tab
-  3. Click collapsed panel (opens flyout)
-  4. Click command button in flyout
+  1. Check /health
+  2. Click Graftd tab (auto_id=Graftd)
+  3. Click collapsed panel (auto_id=CustomCtrl_%Graftd%{Panel})
+  4. Click command in flyout (auto_id=...%{CommandName})
   5. Wait for result dialog
 """
 
@@ -29,189 +29,120 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
     def log(msg):
         print(f"[{elapsed():.1f}s] {msg}", flush=True)
 
-    # ── Pre-flight: health check ────────────────────────────────────
-    log("Checking server health...")
+    # -- Pre-flight: health check -----------------------------------------
+    log("Health check...")
     h = api.health()
     if "error" in h:
         log(f"FAIL: Server not reachable. Start it: .\\serve.ps1")
-        log(f"  error: {h['error']}")
         return False, "Server not reachable"
 
     state = h.get("state", "unknown")
     proc = h.get("process", {})
     log(f"Revit state={state} pid={proc.get('pid')} mem={proc.get('memory_mb')}MB "
-        f"cpu={proc.get('cpu_pct')}% uptime={proc.get('started_ago')}")
+        f"uptime={proc.get('started_ago')}")
 
     if state == "not_running":
-        log("FAIL: Revit not running.")
-        log("  ACTION: .\\dev-restart-quick.ps1")
+        log("FAIL: Revit not running. ACTION: .\\dev-restart-quick.ps1")
         return False, "Revit not running"
 
     if state == "security_dialog":
-        log("Security dialog detected. Dismissing...")
+        log("Security dialog detected. Dismissing via auto_id...")
         r = api.click(path="0.3", method="invoke")
-        log(f"  click result: {r}")
+        log(f"  dismiss: {r.get('clicked')}")
         time.sleep(3)
-        # re-check
         h = api.health()
-        state = h.get("state", "unknown")
-        log(f"  state after dismiss: {state}")
+        state = h.get("state")
         if state == "security_dialog":
-            log("FAIL: Security dialog still present.")
-            log("  ACTION: Click 'Always Load' manually in Revit")
-            return False, "Security dialog not dismissed"
+            log("FAIL: Security dialog still present. ACTION: Click 'Always Load' manually")
+            return False, "Security dialog"
 
     if state == "loading":
-        log(f"Revit loading project... waiting (mem={proc.get('memory_mb')}MB)")
+        log("Revit loading project, waiting...")
         for i in range(30):
             time.sleep(3)
             h = api.health()
             state = h.get("state")
             p = h.get("process", {})
-            log(f"  [{i*3}s] state={state} mem={p.get('memory_mb')}MB cpu={p.get('cpu_pct')}%")
+            log(f"  state={state} mem={p.get('memory_mb')}MB")
             if state == "ready":
                 break
         if state != "ready":
-            log("FAIL: Revit did not finish loading.")
+            log("FAIL: Revit did not finish loading")
             return False, "Revit not ready"
 
-    if state == "starting":
-        log("Revit just started, waiting for UI...")
-        time.sleep(10)
-        h = api.health()
-        state = h.get("state")
-        log(f"  state after wait: {state}")
+    log(f"Revit ready. window={h.get('window', '?')!r}")
 
-    log(f"Revit ready. Window: {h.get('window', '?')}")
-
-    # ── Step 1: Click Graftd tab ────────────────────────────────────
-    log("Step 1: Clicking Graftd tab...")
-    t0 = time.time()
-    search = api._get("/search?q=Graftd&by=auto_id&depth=2")
-    results = search.get("results", [])
-    dt = time.time() - t0
-    graftd_path = None
-    for res in results:
-        if res.get("auto_id") == "Graftd" and res.get("type") == "Button":
-            graftd_path = res["path"]
-            break
-    if not graftd_path:
-        log(f"  FAIL: Graftd tab not found via /search ({dt:.1f}s)")
-        log(f"  search results: {results}")
-        return False, "Graftd tab not found"
-    log(f"  Found Graftd at path={graftd_path} ({dt:.1f}s)")
-    r = api.click(path=graftd_path, method="invoke")
-    log(f"  Click: clicked={r.get('clicked')} text={r.get('text')!r}")
-    if not r.get("clicked"):
-        return False, f"Graftd click failed: {r.get('error')}"
+    # -- Step 1: Click Graftd tab -----------------------------------------
+    log("Step 1: Click Graftd tab (auto_id=Graftd, type=Button)")
+    r = api.click(auto_id="Graftd", control_type="Button", method="invoke")
+    if r.get("clicked"):
+        log(f"  OK path={r.get('path')}")
+    else:
+        log(f"  FAIL: {r.get('error')}")
+        return False, f"Graftd click: {r.get('error')}"
     time.sleep(1)
 
-    # Build cache: fetch Graftd tab content (ListBox[0] -> DataItems -> panels)
-    log("  Caching Graftd panel tree...")
-    t0 = time.time()
-    # ListBox is child[0], Graftd DataItem is typically at index 18
-    # Fetch with depth=4 to capture panel buttons
-    panel_tree = api.tree(path="0", depth=4)
-    dt = time.time() - t0
-    log(f"  Cached ListBox tree ({dt:.1f}s)")
+    # cache Graftd panel subtree for next steps
+    log("  Caching panel tree (ListBox[0] depth=4)...")
+    api.tree(path="0", depth=4)
+    log("  Cached.")
 
-    # ── Step 2: Click collapsed panel ───────────────────────────────
-    log(f"Step 2: Clicking panel {panel_auto_id}...")
-    # search in the cached panel tree via jmespath
-    t0 = time.time()
-    search = api._get(f"/search?q={panel_auto_id}&by=auto_id&depth=6")
-    results = search.get("results", [])
-    dt = time.time() - t0
-    if not results:
-        log(f"  FAIL: Panel {panel_auto_id} not found ({dt:.1f}s)")
-        return False, f"Panel {panel_auto_id} not found"
-    panel_path = results[0]["path"]
-    log(f"  Found panel at path={panel_path} ({dt:.1f}s)")
-    # find Button child inside panel (collapsed icon)
-    t0 = time.time()
-    panel_tree = api.tree(path=panel_path, depth=1)
-    btn_path = panel_path
-    for i, child in enumerate(panel_tree.get("children", [])):
-        if child.get("type") == "Button":
-            btn_path = f"{panel_path}.{i}"
-            log(f"  Button child at {btn_path}")
-            break
-    r = api.click(path=btn_path, method="focus_click")
-    dt2 = time.time() - t0
-    log(f"  Click: clicked={r.get('clicked')} text={r.get('text')!r} ({dt2:.1f}s)")
-    if not r.get("clicked"):
-        return False, f"Panel click failed: {r.get('error')}"
+    # -- Step 2: Click collapsed panel ------------------------------------
+    log(f"Step 2: Click panel (auto_id={panel_auto_id}, type=Button)")
+    r = api.click(auto_id=panel_auto_id, control_type="Button", method="focus_click")
+    if r.get("clicked"):
+        log(f"  OK path={r.get('path')}")
+    else:
+        # try Custom type (panel wrapper)
+        log(f"  Button miss, trying Custom...")
+        r = api.click(auto_id=panel_auto_id, control_type="Custom", method="focus_click")
+        if r.get("clicked"):
+            log(f"  OK path={r.get('path')}")
+        else:
+            log(f"  FAIL: {r.get('error')}")
+            return False, f"Panel click: {r.get('error')}"
     time.sleep(1)
 
-    # ── Step 3: Find and click command in flyout ────────────────────
-    log(f"Step 3: Looking for flyout and {cmd_auto_id}...")
-    # poll for flyout via /search (uses cache, fast)
-    cmd_path = None
+    # -- Step 3: Click command in flyout ----------------------------------
+    log(f"Step 3: Click command (auto_id contains {cmd_auto_id})")
+    # poll: flyout appears as child, triggers deep scan -> id_map update
+    cmd_clicked = False
     for attempt in range(15):
-        t0 = time.time()
-        # fetch fresh tree to update cache with flyout
-        tree = api.tree(depth=2)
-        dt = time.time() - t0
-        # look for flyout in children
-        children = tree.get("children", [])
-        flyout_idx = None
-        for i, child in enumerate(children):
-            aid = child.get("id", "")
-            if "SlideOutPanelPopup" in aid or "PopupRoot" in aid:
-                flyout_idx = i
-                log(f"  Flyout at [{i}] ({dt:.1f}s, attempt {attempt+1})")
-                break
-        if flyout_idx is not None:
-            # search within flyout for command
-            search = api._get(f"/search?q={cmd_auto_id}&by=auto_id&depth=4&scope={flyout_idx}")
-            results = search.get("results", [])
-            if results:
-                cmd_path = results[0]["path"]
-                log(f"  Command: path={cmd_path} text={results[0].get('text')!r}")
-                break
-            else:
-                # flyout found but command not yet -- fetch deeper
-                api.tree(path=str(flyout_idx), depth=4)
-                search = api._get(f"/search?q={cmd_auto_id}&by=auto_id&depth=4&scope={flyout_idx}")
-                results = search.get("results", [])
-                if results:
-                    cmd_path = results[0]["path"]
-                    log(f"  Command (deep): path={cmd_path}")
-                    break
+        # trigger tree fetch to update cache/map with flyout
+        api.tree(depth=2)
+        r = api.click(auto_id=cmd_auto_id, control_type="Button", method="click_input")
+        if r.get("clicked"):
+            log(f"  OK path={r.get('path')} (attempt {attempt+1})")
+            cmd_clicked = True
+            break
         if attempt == 0:
-            log(f"  Not yet ({dt:.1f}s), polling...")
+            log(f"  Not found yet, polling...")
         time.sleep(0.5)
 
-    if not cmd_path:
-        log("  FAIL: Flyout/command not found after 15 attempts.")
-        return False, "Flyout or command not found"
+    if not cmd_clicked:
+        log(f"  FAIL: {cmd_auto_id} not found after 15 attempts")
+        return False, f"Command {cmd_auto_id} not found"
 
-    r = api.click(path=cmd_path, method="click_input")
-    log(f"  Click: clicked={r.get('clicked')}")
-    if not r.get("clicked"):
-        return False, f"Command click failed: {r.get('error')}"
-
-    # ── Step 4: Wait for result dialog ──────────────────────────────
-    log("Step 4: Waiting for result dialog...")
+    # -- Step 4: Wait for result dialog -----------------------------------
+    log("Step 4: Waiting for result...")
     deadline = start + timeout
     poll_count = 0
     while time.time() < deadline:
         time.sleep(2)
         poll_count += 1
-        t0 = time.time()
         tree = api.tree(depth=1)
-        dt = time.time() - t0
         children = tree.get("children", [])
 
         for child in children:
             ct = child.get("text", "")
             if result_title_match in ct or "Command Failure" in ct:
-                log(f"  Result dialog found: {ct!r} (poll #{poll_count}, {dt:.1f}s)")
+                log(f"  Result found: {ct!r} (poll #{poll_count})")
 
-                # get details
+                # get result text from dialog children
                 result_idx = None
                 for i, c in enumerate(children):
-                    if result_title_match in c.get("text", "") or "Command Failure" in c.get("text", ""):
+                    t = c.get("text", "")
+                    if result_title_match in t or "Command Failure" in t:
                         result_idx = i
                         break
 
@@ -224,7 +155,7 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
                             if t.strip():
                                 result_text += t + " "
                 result_text = result_text.strip()
-                log(f"  Result text: {result_text}")
+                log(f"  {result_text}")
 
                 if "Command Failure" in ct:
                     return False, f"Command failure: {result_text}"
@@ -238,7 +169,7 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
         if poll_count % 5 == 0:
             h = api.health()
             p = h.get("process", {})
-            log(f"  [{elapsed():.0f}s] Revit state={h.get('state')} mem={p.get('memory_mb')}MB cpu={p.get('cpu_pct')}% (poll #{poll_count})")
+            log(f"  [{elapsed():.0f}s] state={h.get('state')} mem={p.get('memory_mb')}MB (poll #{poll_count})")
 
-    log(f"FAIL: Result dialog did not appear after {timeout}s ({poll_count} polls).")
+    log(f"FAIL: Result not found after {timeout}s ({poll_count} polls)")
     return False, "Timeout waiting for result"
