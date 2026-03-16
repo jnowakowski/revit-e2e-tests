@@ -44,7 +44,7 @@ def _extract_document(window_title):
 class Cache:
     def __init__(self, db_path=None):
         self._path = db_path or DB_PATH
-        self._conn = sqlite3.connect(str(self._path))
+        self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_CREATE)
 
