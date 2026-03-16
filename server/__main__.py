@@ -250,6 +250,20 @@ def get_element_by_path(path):
     return current
 
 
+def _find_path_in_json(tree, target, _prefix=""):
+    """Find index path of a node in a JSON tree by matching text+type+id."""
+    for i, child in enumerate(tree.get("children", [])):
+        path = f"{_prefix}.{i}" if _prefix else str(i)
+        if (child.get("text") == target.get("text") and
+            child.get("type") == target.get("type") and
+            child.get("id", "") == target.get("id", "")):
+            return path
+        deeper = _find_path_in_json(child, target, path)
+        if deeper:
+            return deeper
+    return None
+
+
 def _find_elem_by_dict(parent, target_dict, max_depth=3, _depth=0):
     """Find a live UIA element matching a dict from elem_to_dict (by text+type+id)."""
     try:
@@ -418,63 +432,98 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(result)
 
         elif parsed.path == "/search":
-            ensure_connected()
             query = qs.get("q", [None])[0]
-            by = qs.get("by", ["auto_id"])[0]  # auto_id, text
-            scope = qs.get("scope", [None])[0]  # path to search within
-            max_depth = int(qs.get("depth", ["3"])[0])
+            by = qs.get("by", ["auto_id"])[0]
+            scope = qs.get("scope", [None])[0]
+            use_cache = qs.get("cache", ["auto"])[0]  # auto, only, live
 
             if not query:
                 self.respond({"error": "Provide ?q=search_term"}, 400)
                 return
 
-            target = _main_win
-            if scope:
-                target = get_element_by_path(scope)
-                if not target:
-                    self.respond({"error": f"Scope path {scope} not found"}, 404)
-                    return
-
+            # try cache first via jmespath (unless live forced)
             results = []
-            def search_recursive(elem, current_path, depth):
-                if depth > max_depth:
-                    return
-                try:
-                    kids = elem.children()
-                except Exception:
-                    return
-                for i, child in enumerate(kids):
-                    child_path = f"{current_path}.{i}" if current_path else str(i)
-                    try:
-                        match = False
-                        if by == "auto_id":
-                            aid = child.automation_id()
-                            if query.lower() in aid.lower():
-                                match = True
-                        elif by == "text":
-                            t = child.window_text()
-                            if query.lower() in t.lower():
-                                match = True
-                        if match:
-                            results.append({
-                                "path": child_path,
-                                "text": child.window_text()[:120],
-                                "type": child.friendly_class_name(),
-                                "auto_id": child.automation_id()[:80] if child.automation_id() else "",
-                            })
-                    except Exception:
-                        pass
-                    if depth < max_depth:
-                        search_recursive(child, child_path, depth + 1)
+            source = "live"
+            if use_cache != "live" and _cache:
+                t0 = time.time()
+                cached_tree = _cache.latest_tree(None)
+                if cached_tree:
+                    # build jmespath expression from query params
+                    if by == "auto_id":
+                        # search depth 1 and 2 with null-safe contains
+                        flat = jmespath.search(f"children[?id && contains(id, '{query}')]", cached_tree) or []
+                        deep = jmespath.search(f"children[].children[?id && contains(id, '{query}')][]", cached_tree) or []
+                        all_matches = flat + deep
+                    elif by == "text":
+                        flat = jmespath.search(f"children[?text && contains(text, '{query}')]", cached_tree) or []
+                        deep = jmespath.search(f"children[].children[?text && contains(text, '{query}')][]", cached_tree) or []
+                        all_matches = flat + deep
+                    else:
+                        all_matches = []
+                    for m in all_matches:
+                        # resolve index path by walking cached tree
+                        path = _find_path_in_json(cached_tree, m)
+                        results.append({
+                            "path": path or "",
+                            "text": m.get("text", ""),
+                            "type": m.get("type", ""),
+                            "auto_id": m.get("id", ""),
+                        })
+                ms = int((time.time() - t0) * 1000)
+                if results:
+                    source = "cache"
+                    _stats.cache_hit += 1
+                    log.info("CACHE /search  q=%r by=%s hits=%d  %dms  [%s]", query, by, len(results), ms, _stats.summary())
 
-            t0 = time.time()
-            search_recursive(target, scope or "", 0)
-            ms = int((time.time() - t0) * 1000)
-            _stats.live += 1
-            search_result = {"query": query, "by": by, "results": results}
-            if _cache:
-                _cache.record(_doc_title(), "/search", search_result, path=scope, query=query)
-            log.info("LIVE /search  q=%r by=%s hits=%d  %dms  [%s]", query, by, len(results), ms, _stats.summary())
+            # live fallback (unless cache-only)
+            if not results and use_cache != "only":
+                ensure_connected()
+                max_depth = int(qs.get("depth", ["3"])[0])
+                target = _main_win
+                if scope:
+                    target = get_element_by_path(scope)
+                    if not target:
+                        self.respond({"error": f"Scope path {scope} not found"}, 404)
+                        return
+
+                def search_recursive(elem, current_path, depth):
+                    if depth > max_depth:
+                        return
+                    try:
+                        kids = elem.children()
+                    except Exception:
+                        return
+                    for i, child in enumerate(kids):
+                        child_path = f"{current_path}.{i}" if current_path else str(i)
+                        try:
+                            match = False
+                            if by == "auto_id":
+                                aid = child.automation_id()
+                                if query.lower() in aid.lower():
+                                    match = True
+                            elif by == "text":
+                                t = child.window_text()
+                                if query.lower() in t.lower():
+                                    match = True
+                            if match:
+                                results.append({
+                                    "path": child_path,
+                                    "text": child.window_text()[:120],
+                                    "type": child.friendly_class_name(),
+                                    "auto_id": child.automation_id()[:80] if child.automation_id() else "",
+                                })
+                        except Exception:
+                            pass
+                        if depth < max_depth:
+                            search_recursive(child, child_path, depth + 1)
+
+                t0 = time.time()
+                search_recursive(target, scope or "", 0)
+                ms = int((time.time() - t0) * 1000)
+                _stats.live += 1
+                source = "live"
+                log.info("LIVE /search  q=%r by=%s hits=%d  %dms  [%s]", query, by, len(results), ms, _stats.summary())
+            search_result = {"query": query, "by": by, "source": source, "results": results}
             self.respond(search_result)
 
         elif parsed.path == "/q":
