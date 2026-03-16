@@ -1,6 +1,9 @@
 """
 Revit plugin E2E test runner.
 
+Requires the server running: .\\serve.ps1 or python -m server
+All Revit interaction goes through HTTP (localhost:8520).
+
 Usage:
     python -m runner --flow generate-elevations
     python -m runner --flow get-details
@@ -12,7 +15,7 @@ import os
 import sys
 import time
 
-from runner import ui
+from runner.api import RevitAPI
 from runner.flows import FLOWS
 
 
@@ -28,27 +31,22 @@ def main():
                         help="Save screenshots at each step")
     args = parser.parse_args()
 
-    print(f"[runner] flow={args.flow}, timeout={args.timeout}s, project={args.project}")
+    print(f"[runner] flow={args.flow} timeout={args.timeout}s project={args.project}")
+    print(f"[runner] server=http://127.0.0.1:8520")
 
-    # Connect to Revit
-    print("[runner] Connecting to Revit...")
-    try:
-        app, main_win = ui.connect()
-    except Exception as e:
-        print(f"[runner] FAIL: Could not connect to Revit: {e}")
+    # Pre-flight: check server
+    api = RevitAPI()
+    h = api.health()
+    if "error" in h:
+        print(f"[runner] FAIL: Server not reachable.")
+        print(f"[runner] ACTION: Start server first:")
+        print(f"[runner]   cd C:\\Users\\orion\\source\\repos\\revit-e2e-tests")
+        print(f"[runner]   .\\serve.ps1")
         sys.exit(2)
 
-    # Dismiss security dialogs before anything else
-    dismissed = ui.dismiss_security_dialogs(main_win)
-    if dismissed:
-        print(f"[runner] Dismissed {dismissed} security dialog(s).")
-        time.sleep(2)
-
-    title = main_win.window_text()
-    print(f"[runner] Connected: {title}")
-
-    if args.project.lower() not in title.lower():
-        print(f"[runner] WARNING: Project '{args.project}' not found in window title.")
+    state = h.get("state")
+    proc = h.get("process", {})
+    print(f"[runner] Revit: state={state} pid={proc.get('pid')} mem={proc.get('memory_mb')}MB window={h.get('window', '')!r}")
 
     # Screenshots dir
     screenshots_dir = None
@@ -56,11 +54,12 @@ def main():
         screenshots_dir = os.path.join(
             os.path.expanduser("~"), "Documents", "revit-e2e-screenshots", args.flow)
         os.makedirs(screenshots_dir, exist_ok=True)
+        print(f"[runner] screenshots -> {screenshots_dir}")
 
-    # Run flow
+    # Run flow (common.py handles health checks, security dialogs, etc.)
     flow_fn = FLOWS[args.flow]
     success, result_text = flow_fn(
-        app, main_win,
+        None, None,  # app/main_win not used anymore (HTTP only)
         timeout=args.timeout,
         screenshots_dir=screenshots_dir,
     )
