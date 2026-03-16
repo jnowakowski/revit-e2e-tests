@@ -17,6 +17,20 @@ import time
 from runner.api import RevitAPI
 
 
+def _find_path_in_json(tree, target, _prefix=""):
+    """Find index path of a node in a JSON tree by matching text+type+id."""
+    for i, child in enumerate(tree.get("children", [])):
+        path = f"{_prefix}.{i}" if _prefix else str(i)
+        if (child.get("text") == target.get("text") and
+            child.get("type") == target.get("type") and
+            child.get("id", "") == target.get("id", "")):
+            return path
+        deeper = _find_path_in_json(child, target, path)
+        if deeper:
+            return deeper
+    return None
+
+
 def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_match,
                        timeout=120, screenshots_dir=None):
     """Execute a Graftd ribbon command via HTTP server. Returns (success, result_text)."""
@@ -117,21 +131,20 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
         aid = tree.get("id", "")
         if "SlideOutPanelPopup" in aid or "PopupRoot" in aid:
             log(f"  Flyout found at [0] ({dt:.1f}s, attempt {attempt+1})")
-            # search for command button inside flyout tree (JSON only, no UIA)
+            # search all depths for command button (JSON only, no live UIA)
             import jmespath
-            matches = jmespath.search(
+            matches = []
+            for depth_expr in [
+                f"children[?id && contains(id, '{cmd_auto_id}')][]",
+                f"children[].children[?id && contains(id, '{cmd_auto_id}')][]",
                 f"children[].children[].children[?id && contains(id, '{cmd_auto_id}')][]",
-                tree
-            ) or []
-            if not matches:
-                # try one more level
-                matches = jmespath.search(
-                    f"children[].children[].children[].children[?id && contains(id, '{cmd_auto_id}')][]",
-                    tree
-                ) or []
+                f"children[].children[].children[].children[?id && contains(id, '{cmd_auto_id}')][]",
+            ]:
+                matches = jmespath.search(depth_expr, tree) or []
+                if matches:
+                    break
             if matches:
-                # found -- now click by path within flyout
-                from server.__main__ import _find_path_in_json
+                # found -- resolve path by walking JSON tree
                 cmd_path = _find_path_in_json(tree, matches[0])
                 if cmd_path:
                     full_path = f"0.{cmd_path}"

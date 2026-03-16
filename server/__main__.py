@@ -182,6 +182,7 @@ def _heartbeat_loop():
                 _connected = False
                 globals()['_app'] = None
                 globals()['_main_win'] = None
+                _clear_wrappers()
                 _last_title = ""
             continue
 
@@ -221,16 +222,25 @@ def _doc_title():
         return None
 
 
-# ── AutomationId map (built from cache) ──────────────────────────────
+# ── AutomationId map + wrapper cache ─────────────────────────────────
 
 _id_map = {}  # auto_id -> [{path, type, text}]
-_id_map_child_count = None  # track main window child count for invalidation
+_id_map_child_count = None
+_wrappers = {}  # auto_id -> pywinauto wrapper (live element reference)
+
+
+def _clear_wrappers():
+    """Clear cached wrappers (on reconnect, dialog change, etc.)."""
+    global _wrappers
+    _wrappers.clear()
+    log.info("WRAPPERS: cleared")
 
 
 def _rebuild_id_map():
     """Rebuild auto_id -> path map from all cached trees."""
     global _id_map, _id_map_child_count
     _id_map = {}
+    _clear_wrappers()
 
     if not _cache:
         return
@@ -831,26 +841,46 @@ class Handler(BaseHTTPRequestHandler):
                 ensure_connected()
                 ctype = body.get("type")
                 method = body.get("method", "invoke")
-                entries = resolve_auto_id(auto_id, control_type=ctype)
-                if not entries:
-                    log.info("CLICK auto_id=%r type=%s: not in map, trying live search...", auto_id, ctype)
-                    # fallback: deep scan + retry
-                    _deep_scan()
-                    entries = resolve_auto_id(auto_id, control_type=ctype)
-                if not entries:
-                    self.respond({"clicked": False, "error": f"auto_id {auto_id!r} not found"})
-                    return
-                entry = entries[0]
-                elem = get_element_by_path(entry["path"])
+                cache_key = f"{auto_id}:{ctype or '*'}"
+
+                # 1. Try cached wrapper (instant)
+                elem = None
+                if cache_key in _wrappers:
+                    try:
+                        w = _wrappers[cache_key]
+                        w.window_text()  # verify alive
+                        elem = w
+                        log.info("CLICK auto_id=%r: wrapper cache HIT", auto_id)
+                    except Exception:
+                        del _wrappers[cache_key]
+                        log.info("CLICK auto_id=%r: wrapper stale, removed", auto_id)
+
+                # 2. Resolve from id_map + walk path (slow but only once)
+                entry_path = ""
                 if not elem:
-                    log.info("CLICK auto_id=%r: path %s stale, rebuilding map...", auto_id, entry["path"])
-                    _rebuild_id_map()
                     entries = resolve_auto_id(auto_id, control_type=ctype)
-                    if entries:
-                        elem = get_element_by_path(entries[0]["path"])
+                    if not entries:
+                        _deep_scan()
+                        entries = resolve_auto_id(auto_id, control_type=ctype)
+                    if not entries:
+                        self.respond({"clicked": False, "error": f"auto_id {auto_id!r} not found"})
+                        return
+                    entry_path = entries[0]["path"]
+                    elem = get_element_by_path(entry_path)
+                    if not elem:
+                        _rebuild_id_map()
+                        entries = resolve_auto_id(auto_id, control_type=ctype)
+                        if entries:
+                            entry_path = entries[0]["path"]
+                            elem = get_element_by_path(entry_path)
+                    if elem:
+                        _wrappers[cache_key] = elem  # cache for next time
+                        log.info("CLICK auto_id=%r: resolved path=%s, wrapper CACHED", auto_id, entry_path)
+
                 if not elem:
-                    self.respond({"clicked": False, "error": f"auto_id {auto_id!r} path stale"})
+                    self.respond({"clicked": False, "error": f"auto_id {auto_id!r} not resolved"})
                     return
+
                 t = elem.window_text()
                 ct = elem.friendly_class_name()
                 try:
@@ -866,11 +896,12 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         elem.click_input()
                     result = {"clicked": True, "text": t, "type": ct, "method": method,
-                              "auto_id": auto_id, "path": entry["path"]}
+                              "auto_id": auto_id, "path": entry_path, "cached": cache_key in _wrappers}
                 except Exception as e:
+                    # wrapper failed, clear it
+                    _wrappers.pop(cache_key, None)
                     result = {"clicked": False, "text": t, "error": str(e)}
-                log.info("CLICK auto_id=%r path=%s ok=%s  [%s]",
-                         auto_id, entry["path"], result.get("clicked"), _stats.summary())
+                log.info("CLICK auto_id=%r ok=%s  [%s]", auto_id, result.get("clicked"), _stats.summary())
                 self.respond(result)
                 return
 
