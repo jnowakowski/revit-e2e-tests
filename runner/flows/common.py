@@ -88,6 +88,7 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
     # -- Step 3: command in flyout ----------------------------------------
     log(f"click {cmd_auto_id} in flyout")
     cmd_clicked = False
+    panel_retried = False
     for attempt in range(15):
         # check child[0] -- flyout appears here
         first = api.tree(path="0", depth=0)
@@ -95,7 +96,16 @@ def run_graftd_command(app, main_win, panel_auto_id, cmd_auto_id, result_title_m
         if "SlideOutPanelPopup" not in aid and "PopupRoot" not in aid:
             if attempt == 0:
                 log(f"  flyout not at [0] yet (got {first.get('type')}:{aid[:30]})")
-            time.sleep(0.5)
+            # after 3 misses, re-click panel (focus may have been lost)
+            if attempt == 3 and not panel_retried:
+                panel_retried = True
+                log(f"  re-clicking panel...")
+                api.click(auto_id=panel_auto_id, control_type="Button", method="focus_click")
+                if not r.get("clicked"):
+                    api.click(auto_id=panel_auto_id, control_type="Custom", method="focus_click")
+                time.sleep(1)
+            else:
+                time.sleep(0.5)
             continue
 
         # flyout found -- get its tree and find command

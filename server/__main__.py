@@ -159,6 +159,7 @@ def _deep_scan():
                 pass
 
         _rebuild_id_map()
+        _restore_wrappers()
         log.info("DEEP SCAN: complete")
     except Exception as e:
         log.warning("DEEP SCAN: failed: %s", e)
@@ -227,6 +228,46 @@ def _doc_title():
 _id_map = {}  # auto_id -> [{path, type, text}]
 _id_map_child_count = None
 _wrappers = {}  # auto_id -> pywinauto wrapper (live element reference)
+
+
+_WRAPPER_BACKUP = Path(__file__).resolve().parent.parent / "wrapper_paths.json"
+
+
+def _save_wrapper_paths():
+    """Save auto_id -> path mapping so we can rebuild wrappers after reload."""
+    paths = {}
+    for key, wrapper in _wrappers.items():
+        # key is "auto_id:type", we need to find path from id_map
+        auto_id = key.split(":")[0]
+        entries = _id_map.get(auto_id, [])
+        if entries:
+            paths[key] = entries[0]["path"]
+    try:
+        _WRAPPER_BACKUP.write_text(json.dumps(paths, indent=2))
+        log.info("WRAPPERS: saved %d paths to %s", len(paths), _WRAPPER_BACKUP)
+    except Exception as e:
+        log.warning("WRAPPERS: save failed: %s", e)
+
+
+def _restore_wrappers():
+    """Rebuild wrappers from saved paths after server reload."""
+    global _wrappers
+    if not _WRAPPER_BACKUP.exists() or not _main_win:
+        return
+    try:
+        paths = json.loads(_WRAPPER_BACKUP.read_text())
+        restored = 0
+        for key, path in paths.items():
+            try:
+                elem = get_element_by_path(path)
+                if elem:
+                    _wrappers[key] = elem
+                    restored += 1
+            except Exception:
+                pass
+        log.info("WRAPPERS: restored %d/%d from backup", restored, len(paths))
+    except Exception as e:
+        log.warning("WRAPPERS: restore failed: %s", e)
 
 
 def _clear_wrappers():
@@ -911,6 +952,8 @@ class Handler(BaseHTTPRequestHandler):
                     # wrapper failed, clear it
                     _wrappers.pop(cache_key, None)
                     result = {"clicked": False, "text": t, "error": str(e)}
+                if result.get("clicked"):
+                    _save_wrapper_paths()
                 log.info("CLICK auto_id=%r ok=%s  [%s]", auto_id, result.get("clicked"), _stats.summary())
                 self.respond(result)
                 return
