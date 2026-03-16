@@ -94,13 +94,23 @@ def _detect_state(proc_info, main_win):
     return "ready"
 
 
-def check(main_win=None):
-    """Full health check. Returns dict with state, process info, context."""
+def check(main_win=None, reconnect_fn=None):
+    """Full health check. Returns dict with state, process info, context.
+    reconnect_fn: callable that reconnects to Revit and returns new main_win."""
     global _last_state, _state_since
 
     proc = _find_revit()
     info = _proc_info(proc) if proc else None
     state = _detect_state(info, main_win)
+
+    # auto-reconnect: if process looks ready but window title is empty
+    if state == "loading" and info and reconnect_fn:
+        mem = info["memory_mb"]
+        cpu = info["cpu_pct"]
+        if mem > 500 and cpu < 10:
+            # process is big and idle -- probably loaded, stale connection
+            main_win = reconnect_fn()
+            state = _detect_state(info, main_win)
 
     # track state transitions
     now = time.time()

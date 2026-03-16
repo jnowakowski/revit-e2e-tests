@@ -308,7 +308,14 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
 
         if parsed.path == "/health":
-            h = health.check(_main_win)
+            def _reconnect():
+                global _main_win
+                try:
+                    connect()
+                except Exception:
+                    pass
+                return _main_win
+            h = health.check(_main_win, reconnect_fn=_reconnect)
             log.info("GET /health  state=%s  %s", h["state"], h.get("in_state", ""))
             self.respond(h)
 
