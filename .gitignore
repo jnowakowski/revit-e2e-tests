@@ -4,3 +4,8 @@ __pycache__/
 screenshots/
 *.db
 *.log
+
+# Run artefacts (auto-generated)
+*.done
+journal.????.txt
+dev-journal-test.txt
